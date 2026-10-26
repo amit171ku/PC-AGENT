@@ -1,172 +1,162 @@
 # PC Agent
 
-A local AI agent with a web interface. Type a command in your browser and the agent can manage files in a sandboxed workspace folder and search or browse the web, powered by the Groq API.
+A local AI agent with a modern web interface, powered by the Groq API. Give it commands through your browser to manage files inside a sandboxed workspace and search or browse the web.
 
 ## Features
 
-- **File management:** list, read, search, create, rename, move and delete files inside one workspace folder
-- **Web browsing:** search the web, open pages, read page text, click and type (a real Chromium window opens so you can watch)
-- **Approval prompts:** writing, moving, deleting, clicking and typing all ask Allow/Deny first
-- **Safe deletes:** deleted files go to a hidden `.trash` folder instead of being erased
-- **Action log:** every tool call is saved to `agent_log.txt`
-- **Auto model pick:** tests your Groq models at startup and uses one that supports tool calling
-- **Modern UI:** sidebar with quick actions and live workspace file list, light/dark theme, mobile friendly
+- **File Management:** List, read, search, create, rename, move, and delete files within a configured workspace.
+- **Web Browsing:** Search the web, open pages, read page content, and interact with websites using Playwright and Chromium.
+- **Approval Prompts:** Request Allow/Deny approval before supported file and browser actions.
+- **Safe Deletes:** Move deleted files to a hidden `.trash` folder instead of permanently deleting them.
+- **Action Logging:** Record tool calls in `agent_log.txt`.
+- **Automatic Model Selection:** Test configured Groq models and select a compatible model for tool calling.
+- **Modern UI:** Responsive interface with a sidebar, quick actions, workspace file list, and light/dark themes.
 
 ## Requirements
 
 - Python 3.10 or newer
-- A free Groq API key from https://console.groq.com
-- Windows, macOS or Linux
+- A Groq API key: https://console.groq.com
+- Windows, macOS, or Linux
 
-## Project structure
+## Project Structure
 
-```
+```text
 pc-agent/
-├── main.py              FastAPI backend + agent logic
+├── main.py
 ├── requirements.txt
-├── .env                 your API key (never share or commit this)
+├── .env.example
 ├── .gitignore
 ├── README.md
-├── venv/                virtual environment (created by you)
 └── static/
-    ├── index.html       page layout
-    ├── style.css        styling
-    └── app.js           frontend logic
+    ├── index.html
+    ├── style.css
+    └── app.js
 ```
 
-## Setup
+The virtual environment, actual `.env` file, local workspace, logs, and trash folder are created or maintained locally and should not be committed.
 
-Run these from the project folder (PowerShell on Windows).
+## Installation
 
-**1. Create and activate a virtual environment**
+### 1. Clone the repository
+
+```powershell
+git clone https://github.com/amit171ku/PC-AGENT.git
+cd PC-AGENT
+```
+
+### 2. Create a virtual environment
 
 ```powershell
 python -m venv venv
 venv\Scripts\Activate.ps1
 ```
 
-macOS / Linux:
+On macOS or Linux:
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 ```
 
-If PowerShell blocks the activation script, run this once and try again:
+If PowerShell blocks virtual environment activation, use:
 
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
 
-**2. Install packages**
+### 3. Install dependencies
 
-`requirements.txt`:
-
-```
-groq
-playwright
-python-dotenv
-fastapi
-uvicorn[standard]
-```
-
-```powershell
-pip install -r requirements.txt
+```bash
+python -m pip install -r requirements.txt
 playwright install chromium
 ```
 
-**3. Create the `.env` file**
+### 4. Configure environment variables
 
-```
-GROQ_API_KEY=your_key_here
+Create a local `.env` file next to `main.py`:
+
+```dotenv
+GROQ_API_KEY=your_groq_api_key
 GROQ_MODEL=openai/gpt-oss-120b
 ```
 
-- No spaces around `=` and no quotes
-- `GROQ_MODEL` is optional. If it is missing or does not support tools, the app picks another model automatically.
+The model setting is optional if the application supports automatic model selection. Confirm that the selected model is currently available to your Groq account and supports tool calling.
 
-**4. Create `.gitignore`**
+**Never commit your real `.env` file or expose your API key.**
 
-```
-.env
-venv/
-__pycache__/
-```
+### 5. Run the application
 
-## Run
-
-```powershell
-cd "path\to\pc-agent"
-venv\Scripts\Activate.ps1
+```bash
 python main.py
 ```
 
-The terminal prints `Using model: ...` and `Uvicorn running on http://127.0.0.1:8000`. Open **http://127.0.0.1:8000** in your browser.
+Open the local URL printed in the terminal, typically:
+
+http://127.0.0.1:8000
 
 Stop the server with `Ctrl+C`.
 
-## Usage
+## Usage Examples
 
-Type a command and press Enter (Shift+Enter for a new line). Examples:
+Try commands such as:
 
 - `List all files in my workspace`
-- `Create a file called todo.txt with 3 tasks for today`
-- `Sort the files in my workspace into folders by file type`
-- `Search the web for the best Python tips and save a short summary in tips.txt`
-- `Open wikipedia.org and summarize the homepage`
+- `Create a file called todo.txt with three tasks for today`
+- `Organize my workspace files into folders by file type`
+- `Search the web for Python best practices and save a summary to tips.txt`
+- `Open Wikipedia and summarize its homepage`
 
-The sidebar has quick-action buttons for common tasks and a live list of workspace files. Use **New chat** to clear the conversation, which also saves tokens.
+Use **New Chat** to start a fresh conversation and reduce the amount of chat history sent to the model.
 
-## Where files go
+## Workspace and File Safety
 
-By default the agent works only inside:
+By default, the agent uses:
 
-```
-C:\Users\<you>\AgentWorkspace
-```
-
-It is created automatically on first run and also holds `agent_log.txt` and the hidden `.trash` folder. To use a different folder, edit this line in `main.py`:
-
-```python
-ROOT = Path.home() / "AgentWorkspace"
-# or keep it inside the project:
-ROOT = BASE / "workspace"
+```text
+C:\Users\<your-username>\AgentWorkspace
 ```
 
-Start with a test folder before pointing the agent at real documents.
+The workspace is created automatically. It can contain generated files, the action log, and the hidden trash folder.
 
-## Safety
+To change the workspace, configure the `ROOT` path in `main.py`, or use an environment variable if the application supports it.
 
-- The agent can only touch files inside `ROOT`. Paths that escape it are rejected.
-- The server binds to `127.0.0.1`, so only your PC can reach it. Do not change it to `0.0.0.0`.
-- The WebSocket rejects connections from other websites.
-- The agent refuses to type into fields named like `password`, `card` or `cvv`.
-- Unanswered approval prompts are denied after 2 minutes.
-- Never share your `.env` file. If a key leaks, delete it in the Groq console and create a new one.
+**Security considerations:**
+
+- Restrict file operations to the configured workspace and validate resolved paths.
+- Keep the web server bound to `127.0.0.1` unless a secure deployment architecture is implemented.
+- Validate WebSocket origins and enforce action-specific approval checks on the backend.
+- Deny sensitive browser actions and time out unanswered approval requests.
+- Test file operations in a temporary workspace before using real documents.
+- Do not treat approval prompts alone as a complete security boundary.
 
 ## Troubleshooting
 
-| Problem | Fix |
+| Problem | Suggested fix |
 |---|---|
-| `KeyError: 'GROQ_API_KEY'` | `.env` is missing, in the wrong folder, or misspelled. It must sit next to `main.py`. |
-| `tool calling is not supported with this model` | The model does not support tools. Pick a chat model from your Groq model list (not names containing `guard`, `whisper` or `tts`). |
-| `ModuleNotFoundError` | Activate the venv, then run `pip install -r requirements.txt`. |
-| Browser window never opens | Run `playwright install chromium`. |
-| `page closed` errors | The Chromium window was closed. Update `page()` in `main.py` to reopen it automatically, then restart the server. |
-| Page has no styling (`/static/style.css` shows Not Found) | Add `app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")` after `app = FastAPI(...)` and restart the server. |
-| Workspace panel says "File list unavailable" | The `/files` route is missing from `main.py`, or the server was not restarted. |
-| `Address already in use` | Another copy is running. Stop it, or change `PORT` in `main.py`. |
-| `rate_limit` or 429 errors | Groq free limits are small. Wait a minute or click **New chat**. |
-| Old UI still shows after editing | Hard refresh with `Ctrl+F5`. Changes to `main.py` need a server restart. |
+| `KeyError: GROQ_API_KEY` | Check that `.env` exists beside `main.py` and contains the correct variable name. |
+| Model does not support tool calling | Select a currently available Groq model that supports tool use. |
+| `ModuleNotFoundError` | Activate the virtual environment and reinstall requirements. |
+| Chromium does not open | Run `playwright install chromium`. |
+| Page has no styling | Check the FastAPI static-file mount and browser console. |
+| Workspace files are unavailable | Verify the file-list endpoint and restart the server. |
+| Address already in use | Stop the other server process or configure a different port. |
+| Rate limit or HTTP 429 | Wait for the limit to reset, reduce requests, or use an eligible alternative model. |
+| Old UI still appears | Hard refresh with `Ctrl+F5`. Restart the backend after Python changes. |
 
-## Customizing
+## Customization
 
-- **Add a tool:** write a function in `main.py`, add it to `FUNCS` and add a `tool(...)` entry to `TOOLS`.
-- **Change behavior:** edit the `SYSTEM` prompt in `main.py`.
-- **Change the look:** edit `static/style.css`. Colors are CSS variables at the top of the file.
-- **Reduce token use:** lower the `[:3000]` text limits in the read and browser tools, or trim the history length in `worker()`.
+- **Add tools:** Implement a tool function and register it in the application's tool definitions.
+- **Change agent behavior:** Update the system prompt in `main.py`.
+- **Customize the interface:** Edit `static/style.css`.
+- **Reduce token usage:** Limit browser output, file contents, and conversation history.
 
-## Notes
+## Resources
 
-- Groq's model lineup changes often. Check https://console.groq.com/docs/models for current tool-use models.
-- Free-tier limits are low, so keep chats short.
+- Groq Console: https://console.groq.com
+- Groq Models Documentation: https://console.groq.com/docs/models
+- Playwright Documentation: https://playwright.dev/python/
+- FastAPI Documentation: https://fastapi.tiangolo.com/
+
+## License
+
+No license has been specified yet. Add a `LICENSE` file before granting others explicit permission to reuse, modify, or redistribute the project.
