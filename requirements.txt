@@ -1,0 +1,11 @@
+groq
+playwright
+python-dotenv
+fastapi
+uvicorn[standard]
+python-docx
+python-multipart
+pypdf
+openpyxl
+python-pptx
+matplotlib

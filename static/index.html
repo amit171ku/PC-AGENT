@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>PC Agent</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='24' fill='%234f46e5'/%3E%3Ctext x='50' y='68' font-size='56' font-family='Arial' font-weight='700' text-anchor='middle' fill='white'%3EA%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <!-- ===== Icon sprite (Lucide-style, stroke-based) ===== -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-bot" viewBox="0 0 24 24"><path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/></symbol>
+    <symbol id="i-clip" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></symbol>
+    <symbol id="i-sheet" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></symbol>
+    <symbol id="i-slides" viewBox="0 0 24 24"><path d="M2 3h20"/><path d="M21 3v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V3"/><path d="m7 21 5-5 5 5"/></symbol>
+    <symbol id="i-template" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="7" rx="1"/><rect x="3" y="14" width="9" height="7" rx="1"/><rect x="16" y="14" width="5" height="7" rx="1"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></symbol>
+  </svg>
+
+  <div class="shell">
+
+    <!-- ===== Sidebar ===== -->
+    <aside class="sidebar" id="sidebar" aria-label="Sidebar">
+      <div class="side-top">
+        <div class="brand">
+          <div class="logo" aria-hidden="true"><svg class="ico"><use href="#i-bot"/></svg></div>
+          <div>
+            <div class="name">PC Agent</div>
+            <div class="sub">Local AI assistant</div>
+          </div>
+        </div>
+        <button type="button" id="reset" class="btn-new">
+          <svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg> New chat
+        </button>
+      </div>
+
+      <nav class="side-section" aria-label="Quick actions">
+        <button type="button" class="btn-upload js-upload">
+          <svg class="ico" aria-hidden="true"><use href="#i-upload"/></svg> Upload template / sample
+        </button>
+
+        <h3 class="gap">Documents</h3>
+        <button type="button" class="qa" data-prompt="I need a professional project report as a Word document. Ask me what you need to know first.">
+          <span class="qa-ico" aria-hidden="true"><svg class="ico"><use href="#i-doc"/></svg></span> Word report
+        </button>
+        <button type="button" class="qa" data-prompt="Build an Excel workbook for me (budget, tracker or data). Ask me what you need to know first.">
+          <span class="qa-ico" aria-hidden="true"><svg class="ico"><use href="#i-sheet"/></svg></span> Excel workbook
+        </button>
+        <button type="button" class="qa" data-prompt="Build a PowerPoint presentation for me. Ask me what you need to know first.">
+          <span class="qa-ico" aria-hidden="true"><svg class="ico"><use href="#i-slides"/></svg></span> PowerPoint deck
+        </button>
+        <button type="button" class="qa" data-prompt="List the files in my templates folder, read my template, and build a new document that follows its exact format. Ask me for any missing details first.">
+          <span class="qa-ico" aria-hidden="true"><svg class="ico"><use href="#i-template"/></svg></span> Use my template
+        </button>
+
+        <h3 class="gap">Quick actions</h3>
+        <button type="button" class="qa" data-prompt="List all files in my workspace">
+          <span class="qa-ico" aria-hidden="true"><svg class="ico"><use href="#i-folder"/></svg></span> List my files
+        </button>
+        <button type="button" class="qa" data-prompt="Sort the files in my workspace into folders by file type">
+          <span class="qa-ico" aria-hidden="true"><svg class="ico"><use href="#i-layers"/></svg></span> Organize files
+        </button>
+        <button type="button" class="qa" data-prompt="Search the web for the best Python tips and save a short summary in tips.txt">
+          <span class="qa-ico" aria-hidden="true"><svg class="ico"><use href="#i-search"/></svg></span> Research and save
+        </button>
+        <button type="button" class="qa" data-prompt="Open wikipedia.org and summarize the homepage">
+          <span class="qa-ico" aria-hidden="true"><svg class="ico"><use href="#i-globe"/></svg></span> Open a website
+        </button>
+      </nav>
+
+      <section class="side-section grow" aria-label="Workspace files">
+        <div class="sec-head">
+          <h3>Workspace</h3>
+          <div class="sec-actions">
+            <button type="button" class="mini js-upload" title="Upload a template or sample">Upload</button>
+            <button type="button" id="refresh" class="mini" title="Refresh file list">Refresh</button>
+          </div>
+        </div>
+        <input type="file" id="fileInput" multiple hidden accept=".docx,.xlsx,.pptx,.pdf,.txt,.md,.csv,.png,.jpg,.jpeg">
+        <ul id="files" class="files"></ul>
+      </section>
+
+      <div class="side-bottom">
+        <div class="conn" role="status" aria-live="polite">
+          <span class="dot" id="dot" aria-hidden="true"></span>
+          <span id="statusText">Connecting</span>
+        </div>
+        <div class="model" id="meta" title="Active model"></div>
+        <button type="button" id="theme" class="btn-ghost" aria-label="Toggle theme">Theme</button>
+      </div>
+    </aside>
+
+    <div class="scrim" id="scrim"></div>
+
+    <!-- ===== Main ===== -->
+    <div class="main">
+      <header class="topbar">
+        <button type="button" id="menu" class="burger" aria-label="Open menu"><svg class="ico" aria-hidden="true"><use href="#i-menu"/></svg></button>
+        <div class="titles">
+          <h1>Assistant</h1>
+          <p>Files, web research, and Word / Excel / PowerPoint documents, with your approval</p>
+        </div>
+        <span class="badge" title="Changes to files and web pages always ask first">
+          <span class="badge-dot" aria-hidden="true"></span> Approval required
+        </span>
+      </header>
+
+      <main id="chat" role="log" aria-live="polite" aria-label="Conversation">
+        <section id="welcome" class="welcome" aria-labelledby="wTitle">
+          <div class="hero-logo" aria-hidden="true"><svg class="ico"><use href="#i-bot"/></svg></div>
+          <h2 id="wTitle">How can I help today?</h2>
+          <p>Upload your format, answer a few questions, and get a finished Word, Excel or PowerPoint file.</p>
+
+          <button type="button" class="upload-card js-upload">
+            <span class="up-ico" aria-hidden="true"><svg class="ico"><use href="#i-upload"/></svg></span>
+            <span class="up-text">
+              <strong>Upload your template or sample</strong>
+              <small>.docx, .xlsx, .pptx or .pdf. You can also drag and drop files anywhere on this page.</small>
+            </span>
+          </button>
+
+          <div class="features">
+            <div class="feature">
+              <div class="f-ico"><svg class="ico" aria-hidden="true"><use href="#i-doc"/></svg></div>
+              <strong>Word</strong>
+              <span>Reports and proposals with cover, contents, tables and charts.</span>
+            </div>
+            <div class="feature">
+              <div class="f-ico"><svg class="ico" aria-hidden="true"><use href="#i-sheet"/></svg></div>
+              <strong>Excel</strong>
+              <span>Formatted sheets, formulas, totals and native charts.</span>
+            </div>
+            <div class="feature">
+              <div class="f-ico"><svg class="ico" aria-hidden="true"><use href="#i-slides"/></svg></div>
+              <strong>PowerPoint</strong>
+              <span>Slides with bullets, tables, charts and speaker notes.</span>
+            </div>
+          </div>
+
+          <div class="examples">
+            <button type="button" class="example" data-prompt="I need a professional project report as a Word document. Ask me what you need to know first.">Build a project report</button>
+            <button type="button" class="example" data-prompt="List all files in my workspace">List all files in my workspace</button>
+            <button type="button" class="example" data-prompt="Search the web for today's top tech news and save a summary in news.txt">Save today's tech news to a file</button>
+          </div>
+        </section>
+      </main>
+
+      <div id="working" class="working hidden" role="status" aria-live="polite">
+        <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>Agent is working...</span>
+      </div>
+
+      <footer class="dock">
+        <div class="composer">
+          <button type="button" class="attach js-upload" title="Attach a template or sample" aria-label="Attach a template or sample"><svg class="ico" aria-hidden="true"><use href="#i-clip"/></svg></button>
+          <label for="input" class="sr-only">Message</label>
+          <textarea id="input" rows="1" placeholder="Message PC Agent..." autocomplete="off" enterkeyhint="send" autofocus></textarea>
+          <button type="button" id="send" class="send" aria-label="Send message" title="Send">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
+          </button>
+        </div>
+        <div class="hint">Enter to send &middot; Shift+Enter for a new line &middot; Drag and drop files to upload</div>
+      </footer>
+    </div>
+  </div>
+
+  <div id="drop" class="drop hidden" aria-hidden="true">
+    <div class="drop-box">Drop your template or sample to upload it</div>
+  </div>
+
+  <noscript><div class="noscript">PC Agent needs JavaScript. Please enable it and reload.</div></noscript>
+  <script src="/static/app.js"></script>
+</body>
+</html>

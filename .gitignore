@@ -1,0 +1,34 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Node.js
+node_modules/
+dist/
+build/
+
+# IDE and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+.agent_log.txt
+
+# Local agent workspace and generated files
+AgentWorkspace/
+.trash/
