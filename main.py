@@ -15,22 +15,22 @@ from urllib.parse import quote_plus
 import uvicorn
 from dotenv import load_dotenv
 
-load_dotenv(override=True)   # first, so settings such as AGENT_WORKSPACE in .env apply to every module
+load_dotenv(override=True)   # settings in .env apply to every module
 
-from fastapi import (FastAPI, File, HTTPException, Request, UploadFile,  # noqa: E402
+from fastapi import (FastAPI, File, HTTPException, Request, UploadFile,
                      WebSocket, WebSocketDisconnect)
-from fastapi.responses import FileResponse  # noqa: E402
-from fastapi.staticfiles import StaticFiles  # noqa: E402
-from groq import APIStatusError, Groq, RateLimitError  # noqa: E402
-from playwright.sync_api import sync_playwright  # noqa: E402
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from groq import APIStatusError, Groq, RateLimitError
+from playwright.sync_api import sync_playwright
 
-import common  # noqa: E402
-import design_tools  # noqa: E402  (restyle existing Word / PowerPoint files)
-import doc_tools  # noqa: E402  (read_document, export_pdf)
-import excel_tools  # noqa: E402
-import ppt_tools  # noqa: E402
-import word_tools  # noqa: E402
-from common import LOG, ROOT, TRASH, safe, tool  # noqa: E402
+import common
+import design_tools
+import doc_tools
+import excel_tools
+import ppt_tools
+import word_tools
+from common import LOG, ROOT, TRASH, safe, tool
 
 # ---------- Config ----------
 BASE = Path(__file__).parent
@@ -42,7 +42,6 @@ UPLOAD_EXT = {".docx", ".xlsx", ".pptx", ".pdf", ".txt", ".md", ".csv",
 
 client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
-
 CHAT_SKIP = ("guard", "whisper", "tts", "orpheus", "embed", "allam")
 _blocked = {}                 # model -> time when it can be used again (rate limited)
 _dead = {}                    # model -> reason it cannot be used this session
@@ -50,7 +49,7 @@ _current = {"name": ""}       # model currently answering
 
 
 def _wait_secs(err):
-    """Seconds Groq asks us to wait, parsed from the error text (default 20)."""
+    """Seconds Groq asks us to wait, parsed from error text."""
     msg = str(err)
     m = re.search(r"try again in\s+([0-9hms.]+)", msg)
     if m:
@@ -63,9 +62,6 @@ def _wait_secs(err):
 
 
 def build_model_list():
-    """Priority order: GROQ_MODELS from .env (comma separated; GROQ_MODEL also works), then
-    automatic extras unless GROQ_AUTO_FALLBACK=off. Groq limits are per model, so moving to
-    the next model when one is limited keeps the agent working."""
     available = [m.id for m in client.models.list().data]
     chat = [m for m in available if not any(x in m.lower() for x in CHAT_SKIP)]
     raw = os.getenv("GROQ_MODELS", "") or os.getenv("GROQ_MODEL", "")
@@ -90,7 +86,6 @@ print("Models in priority order:", MODELS)
 
 
 def verify_models():
-    """Check at startup that at least one model accepts tool calling."""
     test_tool = [{"type": "function", "function": {
         "name": "ping", "description": "test",
         "parameters": {"type": "object", "properties": {}, "required": []}}}]
@@ -143,12 +138,12 @@ def confirm(action: str) -> bool:
     box = {"event": threading.Event(), "ok": False}
     pending[cid] = box
     emit({"type": "confirm", "id": cid, "text": action})
-    box["event"].wait(timeout=120)      # no answer in 2 minutes = deny
+    box["event"].wait(timeout=120)      # 2 minutes timeout = deny
     pending.pop(cid, None)
     return box["ok"]
 
 
-common.set_confirm_handler(confirm)   # Word/Excel/PowerPoint modules ask through the same browser prompt
+common.set_confirm_handler(confirm)
 
 
 # ---------- Helpers ----------
@@ -166,7 +161,7 @@ def list_dir(path: str = ".") -> str:
 
 
 def read_file(path: str) -> str:
-    return safe(path).read_text(encoding="utf-8", errors="replace")[:3000]
+    return safe(path).read_text(encoding="utf-8", errors="replace")[:4000]
 
 
 def search_files(pattern: str) -> str:
@@ -199,8 +194,10 @@ def delete_file(path: str) -> str:
     return "Moved to trash."
 
 
-# ---------- Browser tools (created lazily inside the worker thread) ----------
+# ---------- Playwright Browser Tools ----------
 _b = {}
+_console_errors = []
+_failed_requests = []
 
 
 def page():
@@ -211,37 +208,139 @@ def page():
             return pg
     except Exception:
         pass
+    close_browser()
+    _b["pw"] = sync_playwright().start()
+
+    # Launch with anti-detection arguments
+    _b["browser"] = _b["pw"].chromium.launch(
+        headless=False,
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-infobars",
+            "--start-maximized",
+        ]
+    )
+    
+    # Create realistic browser context
+    context = _b["browser"].new_context(
+        viewport={"width": 1280, "height": 800},
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    )
+    _b["page"] = context.new_page()
+
+    # Hide webdriver property from Google anti-bot scripts
+    _b["page"].add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+    # Track console errors & failed requests
+    _b["page"].on("console", lambda msg: _console_errors.append(msg.text) if msg.type == "error" else None)
+    _b["page"].on("requestfailed", lambda req: _failed_requests.append(f"{req.method} {req.url} - {req.failure}"))
+    return _b["page"]
+
+
+def close_browser():
     try:
-        if br is not None:
-            br.close()
-    except Exception:
-        pass
-    try:
-        if "pw" in _b:
+        if "browser" in _b and _b["browser"]:
+            _b["browser"].close()
+        if "pw" in _b and _b["pw"]:
             _b["pw"].stop()
     except Exception:
         pass
     _b.clear()
-    _b["pw"] = sync_playwright().start()
-    _b["browser"] = _b["pw"].chromium.launch(headless=False)
-    _b["page"] = _b["browser"].new_page()
-    return _b["page"]
+    _console_errors.clear()
+    _failed_requests.clear()
 
 
+# 1. Navigation & Browsing
 def search_web(query: str) -> str:
-    page().goto("https://duckduckgo.com/html/?q=" + quote_plus(query), timeout=30000)
-    return page().inner_text("body")[:3000]
+    p = page()
+    google_url = f"https://www.google.com/search?q={quote_plus(query)}&hl=en"
 
+    try:
+        p.goto(google_url, wait_until="domcontentloaded", timeout=25000)
 
+        # Dismiss cookie/consent banner if present
+        for button_text in ["Accept all", "I agree", "Reject all", "Read all"]:
+            try:
+                btn = p.locator(f"button:has-text('{button_text}')").first
+                if btn.is_visible(timeout=1000):
+                    btn.click()
+                    p.wait_for_timeout(1000)
+                    break
+            except Exception:
+                pass
+
+        body_text = p.inner_text("body")
+
+        # Check if Google returned an anti-bot CAPTCHA block
+        is_blocked = any(phrase in body_text.lower() for phrase in [
+            "unusual traffic", "recaptcha", "solve the challenge", "bot detection", "robot"
+        ])
+
+        if not is_blocked:
+            try:
+                p.wait_for_selector("#search", timeout=3000)
+                results = p.locator("#search").inner_text()
+                if results and len(results.strip()) > 100:
+                    return results[:4000]
+            except Exception:
+                pass
+            if len(body_text.strip()) > 200:
+                return body_text[:4000]
+
+    except Exception:
+        pass
+
+    # ---------- SILENT FALLBACK (Bing) if Google is blocked ----------
+    print(f"[search] Google challenged; falling back to Bing for query: '{query}'")
+    try:
+        bing_url = f"https://www.bing.com/search?q={quote_plus(query)}&setlang=en"
+        p.goto(bing_url, wait_until="domcontentloaded", timeout=25000)
+        
+        # Grab main search results container
+        try:
+            results = p.locator("#b_results").inner_text(timeout=4000)
+            if results and len(results.strip()) > 100:
+                return results[:4000]
+        except Exception:
+            pass
+
+        return p.inner_text("body")[:4000]
+    except Exception as e:
+        return f"Search error: {e}"
 def open_url(url: str) -> str:
-    page().goto(url, timeout=30000)
-    return f"Opened {page().title()}"
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    resp = page().goto(url, wait_until="domcontentloaded", timeout=30000)
+    status = resp.status if resp else "unknown"
+    return f"Opened: {page().title()} (Status: {status})"
 
 
-def get_page_text() -> str:
-    return page().inner_text("body")[:3000]
+def navigate_browser(action: str) -> str:
+    p = page()
+    act = action.lower().strip()
+    if act == "back":
+        p.go_back(wait_until="domcontentloaded", timeout=15000)
+    elif act == "forward":
+        p.go_forward(wait_until="domcontentloaded", timeout=15000)
+    elif act == "reload":
+        p.reload(wait_until="domcontentloaded", timeout=15000)
+    else:
+        return f"Invalid action: '{action}'. Use 'back', 'forward', or 'reload'."
+    return f"Navigated {act}. Page: {p.title()} ({p.url})"
 
 
+def wait_for(selector: str = "", timeout_ms: str = "2000") -> str:
+    p = page()
+    ms = int(timeout_ms) if str(timeout_ms).isdigit() else 2000
+    if selector.strip():
+        p.wait_for_selector(selector.strip(), timeout=ms)
+        return f"Found '{selector}'."
+    p.wait_for_timeout(ms)
+    return f"Waited {ms}ms."
+
+
+# 2. Automation & Forms
 def click(selector: str) -> str:
     if not confirm(f"Click: {selector}  on {page().url}"):
         return "User denied."
@@ -250,25 +349,140 @@ def click(selector: str) -> str:
 
 
 def type_text(selector: str, text: str) -> str:
-    if any(w in selector.lower() for w in ("password", "card", "cvv")):
-        return "Refused: the agent does not type into sensitive fields."
-    if not confirm(f"Type: {text}  into {selector}"):
+    if any(w in selector.lower() for w in ("password", "card", "cvv", "secret", "ssn")):
+        return "Refused: safety filter prevents typing into sensitive fields."
+    if not confirm(f"Type: '{text}' into {selector}"):
         return "User denied."
     page().fill(selector, text)
     return "Typed."
 
 
-def close_browser():
+def select_dropdown(selector: str, value: str) -> str:
+    if not confirm(f"Select '{value}' in {selector}"):
+        return "User denied."
+    page().select_option(selector, value=value, timeout=10000)
+    return f"Selected '{value}' in {selector}."
+
+
+def press_key(key: str) -> str:
+    page().keyboard.press(key)
+    return f"Pressed '{key}'."
+
+
+def scroll_page(direction: str = "down", amount: str = "600") -> str:
+    px = int(amount) if str(amount).isdigit() else 600
+    delta = px if direction.lower() == "down" else -px
+    page().mouse.wheel(0, delta)
+    page().wait_for_timeout(300)
+    return f"Scrolled {direction} by {px}px."
+
+
+def hover(selector: str) -> str:
+    page().hover(selector, timeout=10000)
+    return f"Hovered over {selector}."
+
+
+# 3. Web Scraping
+def get_page_text() -> str:
+    return page().inner_text("body")[:4000]
+
+
+def extract_links(filter_keyword: str = "") -> str:
+    p = page()
+    links = p.eval_on_selector_all(
+        "a[href]",
+        """els => els.map(a => ({
+            text: a.innerText.trim().replace(/\\s+/g, ' '),
+            href: a.href
+        })).filter(x => x.href && !x.href.startsWith('javascript:'))"""
+    )
+    if filter_keyword.strip():
+        kw = filter_keyword.lower().strip()
+        links = [l for l in links if kw in l["text"].lower() or kw in l["href"].lower()]
+    links = links[:30]
+    return "\n".join(f"- [{l['text'] or 'link'}]({l['href']})" for l in links) or "No links found."
+
+
+def extract_table(selector: str = "table") -> str:
+    p = page()
     try:
-        if "browser" in _b:
-            _b["browser"].close()
-        if "pw" in _b:
-            _b["pw"].stop()
+        rows = p.eval_on_selector(
+            selector,
+            """t => Array.from(t.querySelectorAll('tr')).map(r =>
+                Array.from(r.querySelectorAll('th, td')).map(c => c.innerText.trim().replace(/\\s+/g, ' '))
+            )"""
+        )
+        if not rows:
+            return "Table empty or not found."
+        headers = rows[0]
+        lines = ["| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
+        for r in rows[1:25]:
+            padded = r + [""] * (len(headers) - len(r))
+            lines.append("| " + " | ".join(padded[:len(headers)]) + " |")
+        if len(rows) > 25:
+            lines.append(f"... ({len(rows) - 25} more rows)")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Table extraction error: {e}"
+
+
+# 4. Automated Testing
+def test_element(selector: str, state: str = "visible") -> str:
+    try:
+        page().wait_for_selector(selector, state=state, timeout=5000)
+        return f"PASS: Element '{selector}' is {state}."
     except Exception:
-        pass
+        return f"FAIL: Element '{selector}' is NOT {state}."
 
 
-# ---------- Ask the user a question (waits for an answer in the UI) ----------
+def test_text(expected_text: str) -> str:
+    content = page().inner_text("body")
+    return f"PASS: Found '{expected_text}'" if expected_text in content else f"FAIL: '{expected_text}' not found."
+
+
+def get_console_errors() -> str:
+    errs = []
+    if _console_errors:
+        errs.append("Console Errors:\n" + "\n".join(f"- {e}" for e in _console_errors[-10:]))
+    if _failed_requests:
+        errs.append("Failed Requests:\n" + "\n".join(f"- {f}" for f in _failed_requests[-10:]))
+    return "\n\n".join(errs) if errs else "PASS: No console errors or failed requests recorded."
+
+
+# 5. Screenshots & PDFs
+def take_screenshot(path: str = "reports/screenshot.png", selector: str = "") -> str:
+    p = safe(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if selector.strip():
+        el = page().query_selector(selector.strip())
+        if not el:
+            return f"Selector '{selector}' not found."
+        el.screenshot(path=str(p))
+    else:
+        page().screenshot(path=str(p), full_page=True)
+    return f"Screenshot saved: {p.relative_to(ROOT)}"
+
+
+def export_pdf(path: str = "reports/webpage.pdf") -> str:
+    p = safe(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        page().pdf(path=str(p), print_background=True)
+        return f"PDF saved: {p.relative_to(ROOT)}"
+    except Exception:
+        # Fallback to headless context for PDF export
+        try:
+            hl = _b["pw"].chromium.launch(headless=True)
+            pg = hl.new_page()
+            pg.goto(page().url, wait_until="networkidle", timeout=15000)
+            pg.pdf(path=str(p), print_background=True)
+            hl.close()
+            return f"PDF saved: {p.relative_to(ROOT)}"
+        except Exception as e:
+            return f"PDF export error: {e}"
+
+
+# ---------- Ask user question ----------
 def ask_user(question: str) -> str:
     qid = uuid.uuid4().hex
     box = {"event": threading.Event(), "text": ""}
@@ -276,42 +490,72 @@ def ask_user(question: str) -> str:
     emit({"type": "ask", "id": qid, "text": question})
     box["event"].wait(timeout=900)
     answers.pop(qid, None)
-    return box["text"].strip() or (
-        "(No answer given. Proceed with sensible defaults and mark unknown details as TBD.)")
+    return box["text"].strip() or "(No answer given. Proceed with sensible defaults and mark unknown details as TBD.)"
 
 
-# ---------- Tool registry ----------
-CORE_FUNCS = {f.__name__: f for f in [
-    list_dir, read_file, search_files, write_file, move_file, delete_file,
-    search_web, open_url, get_page_text, click, type_text,
-]}
+# ---------- Tool Registry ----------
+CORE_FUNCS = {
+    # Files
+    "list_dir": list_dir, "read_file": read_file, "search_files": search_files,
+    "write_file": write_file, "move_file": move_file, "delete_file": delete_file,
+    # Browsing & Navigation
+    "search_web": search_web, "open_url": open_url, "navigate_browser": navigate_browser, "wait_for": wait_for,
+    # Automation
+    "click": click, "type_text": type_text, "select_dropdown": select_dropdown,
+    "press_key": press_key, "scroll_page": scroll_page, "hover": hover,
+    # Scraping
+    "get_page_text": get_page_text, "extract_links": extract_links, "extract_table": extract_table,
+    # Testing
+    "test_element": test_element, "test_text": test_text, "get_console_errors": get_console_errors,
+    # Visual & Export
+    "take_screenshot": take_screenshot, "export_pdf": export_pdf,
+}
 
 ASK_SCHEMA = tool("ask_user", "Ask the user clarifying questions and wait. ONE call, short numbered list.",
                   {"question": "Numbered questions"}, ["question"])
 
-# Each module lists (group, schema, function). Groups decide which tools are sent to the model.
 REGISTRY = ([("base", ASK_SCHEMA, ask_user)]
             + doc_tools.REGISTRY
             + word_tools.REGISTRY
             + excel_tools.REGISTRY
             + ppt_tools.REGISTRY
             + design_tools.REGISTRY)
+
 FUNCS = {**CORE_FUNCS, **{schema["function"]["name"]: fn for _, schema, fn in REGISTRY}}
 TOOLS_OFFICE = [schema for _, schema, _ in REGISTRY]
 TOOL_GROUP = {schema["function"]["name"]: group for group, schema, _ in REGISTRY}
 
 TOOLS_CORE = [
+    # File tools
     tool("list_dir", "List files in a workspace folder", ["path"], []),
     tool("read_file", "Read a small text file", ["path"], ["path"]),
     tool("search_files", "Find files by glob pattern", ["pattern"], ["pattern"]),
     tool("write_file", "Create or overwrite a text file", ["path", "content"], ["path", "content"]),
     tool("move_file", "Move or rename a file", ["src", "dst"], ["src", "dst"]),
     tool("delete_file", "Delete a file (moved to trash)", ["path"], ["path"]),
-    tool("search_web", "Search the web, returns result text", ["query"], ["query"]),
-    tool("open_url", "Open a URL in the browser", ["url"], ["url"]),
-    tool("get_page_text", "Get visible text of the current page", [], []),
+    # Navigation
+    tool("search_web", "Search Google and return text results", ["query"], ["query"]),
+    tool("open_url", "Open a website URL in browser", ["url"], ["url"]),
+    tool("navigate_browser", "Navigate page history ('back', 'forward', 'reload')", ["action"], ["action"]),
+    tool("wait_for", "Wait for element or pause (selector, timeout_ms)", ["selector", "timeout_ms"], []),
+    # Automation
     tool("click", "Click an element by CSS selector", ["selector"], ["selector"]),
     tool("type_text", "Type into an input by CSS selector", ["selector", "text"], ["selector", "text"]),
+    tool("select_dropdown", "Select option from <select> dropdown by value", ["selector", "value"], ["selector", "value"]),
+    tool("press_key", "Press keyboard key ('Enter', 'Tab', 'Escape')", ["key"], ["key"]),
+    tool("scroll_page", "Scroll page ('up' or 'down', amount px)", ["direction", "amount"], []),
+    tool("hover", "Hover mouse over element by CSS selector", ["selector"], ["selector"]),
+    # Scraping
+    tool("get_page_text", "Get visible text of current page", [], []),
+    tool("extract_links", "Extract page links (optionally filtered by keyword)", ["filter_keyword"], []),
+    tool("extract_table", "Extract HTML table as markdown", ["selector"], []),
+    # Testing
+    tool("test_element", "Assert element is 'visible' or 'hidden'", ["selector", "state"], ["selector"]),
+    tool("test_text", "Assert specific text is present on page", ["expected_text"], ["expected_text"]),
+    tool("get_console_errors", "Get recorded JS console errors and failed network requests", [], []),
+    # Visual & Export
+    tool("take_screenshot", "Capture page or element screenshot to workspace", ["path", "selector"], ["path"]),
+    tool("export_pdf", "Export current page as PDF to workspace", ["path"], ["path"]),
 ]
 
 GROUP_RE = {
@@ -333,38 +577,31 @@ OFFICE_RE = re.compile(
     re.I)
 
 BASE_PROMPT = (
-    f"You are a PC assistant. Workspace folder: {ROOT} (always use relative paths). "
+     f"You are a PC assistant. Workspace folder: {ROOT} (always use relative paths). "
     "Folders: templates/ holds the user's samples and templates; reports/ is where finished files go. "
-    "You have a real browser (search_web, open_url, get_page_text). For ANY request about searching, "
-    "websites, news, prices or current information you MUST call search_web or open_url and never answer from memory. "
-    "Keep chat replies short and never bypass confirmations."
+    "\nCRITICAL SEARCH RULE: Whenever the user asks to search, find websites, look up news, or check current info, "
+    "you MUST call `search_web(query='...')` directly. "
+    "NEVER call open_url('https://google.com') and NEVER try to type or click into Google's search box manually. "
+    "`search_web` automatically performs the search and returns results to you. "
+    "Keep replies short and never bypass confirmations."
 )
 
 OFFICE_PROMPT = (
-    "\nDOCUMENT WORK: pick the format that fits: Word (.docx) for reports, proposals, letters and memos; "
-    "Excel (.xlsx) for budgets, trackers, schedules, data and calculations; PowerPoint (.pptx) for presentations; "
-    "export_pdf only when a PDF is wanted. You may combine formats. If the format is unclear, ask.\n"
-    "WORKFLOW: (1) list_dir templates/ and read_document any relevant sample or template; follow its structure, "
-    "headings, numbering, columns and tone exactly. (2) If key facts are missing (project name, client, dates, "
-    "budget, results, audience, length), call ask_user ONCE with a short numbered list. Never invent facts, figures "
-    "or dates; use 'TBD'. (3) Build in reports/. Word: report_start (pass template= when a .docx template exists), "
-    "then report_add_content with markdown, several sections per call (about 300 to 600 words), and report_add_chart "
-    "when numbers deserve a chart. Excel: excel_start, excel_add_sheet per table, excel_set_cells for totals "
-    "(like B7==SUM(B2:B6)), excel_add_chart. PowerPoint: ppt_start, ONE ppt_add_slides call with 3 to 6 short bullets "
-    "per slide, plus ppt_add_table_slide or ppt_add_chart_slide where useful. (4) Finish with the file path(s), "
-    "a 2 to 3 line summary, and remind the user to review the files before sharing.\n"
-    "FULL RESTYLE of an existing Word file: call word_design_report ONCE; of an existing PowerPoint: call ppt_design_deck ONCE (pass an output name such as reports/Name_Designed.docx or .pptx). Do not hand-format. Reply with only the output file and a short list of changes.\n"
-    "FULL REDESIGN of a sheet (premium, portfolio, dashboard, KPI, polished): call excel_design_report ONCE with the exact title and subtitle the user gave and the requested output file name. Do not hand-format cell by cell. Reply with only the output file and a short list of changes.\n"
-    "EDITING AN EXISTING EXCEL FILE: first excel_read it to see the real columns and rows, then use excel_format "
-    "(fonts, fills, borders, number formats), excel_conditional_format (color scales, data bars, highlight rules, "
-    "zebra stripes) and excel_layout (freeze header, filter, column widths) with exact ranges. Apply the changes; "
-    "do not say a tool is missing."
+    "\nDOCUMENT WORK: Pick Word (.docx) for reports/proposals, Excel (.xlsx) for budgets/data, "
+    "PowerPoint (.pptx) for presentations. export_pdf only when requested.\n\n"
+    "CRITICAL POWERPOINT DESIGN RULES (NEVER MAKE GENERIC BULLET WALLS):\n"
+    "A professional deck MUST use diverse graphic layouts across slides:\n"
+    "1. TITLE SLIDE: Call ppt_start(title, subtitle, category).\n"
+    "2. METRICS / NUMBERS: Call ppt_add_kpi_slide for key numbers, stats, and achievements (e.g. '$4.2M | Revenue | +25% YoY').\n"
+    "3. PILLARS / KEY THEMES: Call ppt_add_cards_slide to present 3 or 4 strategic points in side-by-side modern cards.\n"
+    "4. COMPARISONS / BEFORE & AFTER: Call ppt_add_split_slide for 2-column comparative analysis.\n"
+    "5. DATA & TABLES: Call ppt_add_chart_slide for trends or ppt_add_table_slide for structured matrices.\n"
+    "DO NOT put all content into plain bullets. Every deck must contain at least 2 visual card or KPI slides.\n"
 )
 
 
 # ---------- Token-saving helpers ----------
 def compact(messages, tail=6, tool_tail=10, limit=1200):
-    """Shrink old, bulky tool arguments/results so long builds stay under rate limits."""
     for m in messages[:max(len(messages) - tail, 0)]:
         if m.get("role") == "assistant" and m.get("tool_calls"):
             for c in m["tool_calls"]:
@@ -382,8 +619,6 @@ def compact(messages, tail=6, tool_tail=10, limit=1200):
 
 
 def trim_history(history, keep=24):
-    """Keep the system prompt and recent messages, starting on a user message
-    so tool results are never separated from their tool calls."""
     if len(history) <= keep + 1:
         return history
     tail = history[-keep:]
@@ -394,7 +629,6 @@ def trim_history(history, keep=24):
 
 
 def _switch(model, why):
-    """Tell the UI when the active model changes."""
     old = _current["name"]
     if old != model:
         _current["name"] = model
@@ -416,8 +650,7 @@ def chat_call(messages, tools):
             wait = min(waits)
             if wait > 120:
                 raise RuntimeError(
-                    f"Every model hit its Groq limit. Try again in about {int(wait // 60) + 1} min "
-                    "(daily token limits can take longer). Click New chat to use fewer tokens.")
+                    f"Every model hit its Groq limit. Try again in about {int(wait // 60) + 1} min.")
             emit({"type": "tool", "text": "rate_limit()"})
             time.sleep(wait + 1)
             continue
@@ -443,8 +676,7 @@ def chat_call(messages, tools):
                 shrunk = True
                 continue
             if e.status_code == 413:
-                raise RuntimeError("This request is too large for Groq's free per-minute limit. "
-                                   "Click New chat and ask for a smaller piece at a time.")
+                raise RuntimeError("Request too large for Groq limit. Start a new chat.")
             if "tool_use_failed" in msg or "failed to call a function" in msg:
                 skip.add(model)
                 reason = f"{model} could not format a tool call"
@@ -522,7 +754,7 @@ def worker():
         emit({"type": "done"})
 
 
-# ---------- FastAPI ----------
+# ---------- FastAPI Server ----------
 @asynccontextmanager
 async def lifespan(app):
     global loop
@@ -607,8 +839,8 @@ async def upload(request: Request, file: UploadFile = File(...)):
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
-    # Block other websites from talking to the agent
-    if ws.headers.get("origin") not in ALLOWED_ORIGINS:
+    origin = ws.headers.get("origin")
+    if origin and origin not in ALLOWED_ORIGINS:
         await ws.close(code=1008)
         return
     await ws.accept()
@@ -636,5 +868,4 @@ async def ws_endpoint(ws: WebSocket):
 
 
 if __name__ == "__main__":
-    # 127.0.0.1 = only this PC can reach it. Do not change to 0.0.0.0.
     uvicorn.run(app, host="127.0.0.1", port=PORT)
