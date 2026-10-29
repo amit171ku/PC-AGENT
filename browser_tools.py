@@ -1,18 +1,13 @@
-"""
-browser_tools.py - Comprehensive Playwright toolkit for AI agents.
-Covers browsing, automation, scraping, testing, screenshots/PDFs, and safety.
-"""
-
-import json
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import urljoin
+from urllib.parse import quote_plus
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
+from common import ROOT, safe
+
 # ---------- State & Lifecycle ----------
-_state = {
+_state: Dict[str, Any] = {
     "pw": None,
     "browser": None,
     "context": None,
@@ -21,27 +16,45 @@ _state = {
     "failed_requests": [],
 }
 
-# Optional confirmation callback: fn(prompt_text: str) -> bool
+# Confirmation callback: fn(prompt_text) -> bool
 _confirm_callback: Optional[Callable[[str], bool]] = None
+
+SENSITIVE_WORDS = ("password", "passwd", "card", "cvv", "secret", "ssn")
 
 
 def set_confirm_handler(fn: Callable[[str], bool]):
-    """Register a confirmation hook (e.g., UI dialog or terminal prompt)."""
+    """Register the confirmation hook (the web UI approval dialog)."""
     global _confirm_callback
     _confirm_callback = fn
 
 
 def _require_confirm(action: str) -> bool:
+    """Ask the user. Denies when no handler is registered (safe default)."""
     if _confirm_callback:
-        return _confirm_callback(action)
-    return True
+        return bool(_confirm_callback(action))
+    return False
+
+
+def _int(value, default: int) -> int:
+    """LLMs often send numbers as strings; accept both."""
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _bool(value, default: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() not in ("false", "0", "no", "off", "")
 
 
 def get_page():
-    """Lazily initialize and return the current Playwright Page."""
+    """Lazily start Chromium and return the active Page (restarts if closed)."""
     pg = _state.get("page")
     br = _state.get("browser")
-
     try:
         if pg is not None and br is not None and br.is_connected() and not pg.is_closed():
             return pg
@@ -51,24 +64,43 @@ def get_page():
     close_browser()
 
     pw = sync_playwright().start()
-    # Note: Headless mode can be set to False for visible automation
-    browser = pw.chromium.launch(headless=True)
+    browser = pw.chromium.launch(
+        headless=False,  # visible window (as described in the README)
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-infobars",
+            "--start-maximized",
+        ],
+    )
     context = browser.new_context(
         viewport={"width": 1280, "height": 800},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
     )
     page = context.new_page()
+    page.add_init_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+    )
 
-    # Track console errors & network failures for testing & debugging
-    page.on("console", lambda msg: _state["console_errors"].append(msg.text) if msg.type == "error" else None)
-    page.on("requestfailed", lambda req: _state["failed_requests"].append(f"{req.method} {req.url} - {req.failure}"))
+    # Track console errors and failed requests for testing/debugging
+    page.on(
+        "console",
+        lambda msg: _state["console_errors"].append(msg.text) if msg.type == "error" else None,
+    )
+    page.on(
+        "requestfailed",
+        lambda req: _state["failed_requests"].append(f"{req.method} {req.url} - {req.failure}"),
+    )
 
     _state.update({"pw": pw, "browser": browser, "context": context, "page": page})
     return page
 
 
 def close_browser():
-    """Teardown browser session and reset tracking state."""
+    """Close the browser and reset all tracking state."""
     try:
         if _state.get("browser"):
             _state["browser"].close()
@@ -87,62 +119,120 @@ def close_browser():
 
 
 # =====================================================================
-# 1. Web Browsing
+# 1. Search & Browsing
 # =====================================================================
 
+def search_web(query: str) -> str:
+    """Search Google (falls back to Bing if blocked) and return result text."""
+    p = get_page()
+    try:
+        p.goto(
+            f"https://www.google.com/search?q={quote_plus(query)}&hl=en",
+            wait_until="domcontentloaded", timeout=25000,
+        )
+
+        # Dismiss cookie/consent banner if present
+        for button_text in ("Accept all", "I agree", "Reject all", "Read all"):
+            try:
+                btn = p.locator(f"button:has-text('{button_text}')").first
+                if btn.is_visible(timeout=1000):
+                    btn.click()
+                    p.wait_for_timeout(1000)
+                    break
+            except Exception:
+                pass
+
+        body_text = p.inner_text("body")
+        blocked = any(
+            phrase in body_text.lower()
+            for phrase in ("unusual traffic", "recaptcha", "solve the challenge",
+                           "bot detection", "robot")
+        )
+
+        if not blocked:
+            try:
+                p.wait_for_selector("#search", timeout=3000)
+                results = p.locator("#search").inner_text()
+                if results and len(results.strip()) > 100:
+                    return results[:4000]
+            except Exception:
+                pass
+            if len(body_text.strip()) > 200:
+                return body_text[:4000]
+    except Exception:
+        pass
+
+    # Silent fallback: Bing
+    print(f"[search] Google challenged; falling back to Bing for: '{query}'")
+    try:
+        p.goto(
+            f"https://www.bing.com/search?q={quote_plus(query)}&setlang=en",
+            wait_until="domcontentloaded", timeout=25000,
+        )
+        try:
+            results = p.locator("#b_results").inner_text(timeout=4000)
+            if results and len(results.strip()) > 100:
+                return results[:4000]
+        except Exception:
+            pass
+        return p.inner_text("body")[:4000]
+    except Exception as e:
+        return f"Search error: {e}"
+
+
 def browser_open(url: str) -> str:
-    """Navigate to a URL and wait for DOM content to load."""
+    """Navigate to a URL and wait for the DOM to load."""
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
     try:
         p = get_page()
         resp = p.goto(url, wait_until="domcontentloaded", timeout=30000)
         status = resp.status if resp else "unknown"
-        return f"Loaded: {p.title()} (Status: {status}) - URL: {p.url}"
+        return f"Opened: {p.title()} (Status: {status}) - {p.url}"
     except PlaywrightError as e:
         return f"Navigation Error: {e}"
 
 
 def browser_navigate(action: str) -> str:
-    """Navigate page history: 'back', 'forward', or 'reload'."""
+    """Navigate history: 'back', 'forward', or 'reload'."""
     p = get_page()
-    action = action.lower().strip()
+    act = action.lower().strip()
     try:
-        if action == "back":
+        if act == "back":
             p.go_back(wait_until="domcontentloaded", timeout=15000)
-        elif action == "forward":
+        elif act == "forward":
             p.go_forward(wait_until="domcontentloaded", timeout=15000)
-        elif action == "reload":
+        elif act == "reload":
             p.reload(wait_until="domcontentloaded", timeout=15000)
         else:
-            return f"Invalid navigation action: '{action}'. Use 'back', 'forward', or 'reload'."
-        return f"Navigated {action}. Current page: {p.title()} ({p.url})"
+            return f"Invalid action: '{action}'. Use 'back', 'forward', or 'reload'."
+        return f"Navigated {act}. Page: {p.title()} ({p.url})"
     except PlaywrightError as e:
         return f"Navigation Error: {e}"
 
 
-def browser_wait(timeout_ms: int = 2000, selector: Optional[str] = None) -> str:
-    """Wait for a CSS selector to appear or pause for a specified duration."""
+def browser_wait(selector: str = "", timeout_ms: str = "2000") -> str:
+    """Wait for a selector to appear, or pause for a duration."""
     p = get_page()
+    ms = _int(timeout_ms, 2000)
     try:
-        if selector:
-            p.wait_for_selector(selector, timeout=timeout_ms)
-            return f"Found element matching '{selector}'."
-        p.wait_for_timeout(timeout_ms)
-        return f"Waited for {timeout_ms}ms."
+        if selector and selector.strip():
+            p.wait_for_selector(selector.strip(), timeout=ms)
+            return f"Found '{selector}'."
+        p.wait_for_timeout(ms)
+        return f"Waited {ms}ms."
     except PlaywrightError as e:
         return f"Wait failed: {e}"
 
 
 # =====================================================================
-# 2. Automation (Actions & Forms)
+# 2. Automation (actions & forms)
 # =====================================================================
 
 def browser_click(selector: str) -> str:
-    """Click an element identified by CSS or XPath selector."""
     p = get_page()
-    if not _require_confirm(f"Click '{selector}' on {p.url}"):
-        return "Action cancelled by user."
+    if not _require_confirm(f"Click: {selector} on {p.url}"):
+        return "User denied."
     try:
         p.click(selector, timeout=10000)
         return f"Clicked '{selector}'."
@@ -150,32 +240,26 @@ def browser_click(selector: str) -> str:
         return f"Click Error: {e}"
 
 
-def browser_fill(selector: str, text: str, clear_first: bool = True) -> str:
-    """Fill text into an input field or textarea."""
-    # Safety guard: Prevent typing into sensitive fields
-    lowered = selector.lower()
-    if any(s in lowered for s in ("password", "passwd", "cvv", "card", "ssn", "secret")):
-        return "Blocked by safety filter: refusing to input into sensitive fields."
-
+def browser_fill(selector: str, text: str, clear_first: str = "true") -> str:
+    if any(w in selector.lower() for w in SENSITIVE_WORDS):
+        return "Refused: safety filter prevents typing into sensitive fields."
     p = get_page()
-    if not _require_confirm(f"Fill '{text}' into '{selector}'"):
-        return "Action cancelled by user."
-
+    if not _require_confirm(f"Type: '{text}' into {selector}"):
+        return "User denied."
     try:
-        if clear_first:
+        if _bool(clear_first):
             p.fill(selector, text, timeout=10000)
         else:
-            p.type(selector, text, timeout=10000)
-        return f"Filled input '{selector}'."
+            p.locator(selector).press_sequentially(text, timeout=10000)
+        return f"Typed into '{selector}'."
     except PlaywrightError as e:
         return f"Fill Error: {e}"
 
 
 def browser_select(selector: str, value: str) -> str:
-    """Select an option in a <select> element by label or value."""
     p = get_page()
-    if not _require_confirm(f"Select '{value}' on '{selector}'"):
-        return "Action cancelled by user."
+    if not _require_confirm(f"Select '{value}' in {selector}"):
+        return "User denied."
     try:
         p.select_option(selector, value=value, timeout=10000)
         return f"Selected '{value}' in '{selector}'."
@@ -183,45 +267,43 @@ def browser_select(selector: str, value: str) -> str:
         return f"Select Error: {e}"
 
 
-def browser_check(selector: str, checked: bool = True) -> str:
-    """Check or uncheck a checkbox or radio button."""
+def browser_check(selector: str, checked: str = "true") -> str:
+    want = _bool(checked)
     p = get_page()
-    if not _require_confirm(f"{'Check' if checked else 'Uncheck'} '{selector}'"):
-        return "Action cancelled by user."
+    if not _require_confirm(f"{'Check' if want else 'Uncheck'}: {selector}"):
+        return "User denied."
     try:
-        if checked:
+        if want:
             p.check(selector, timeout=10000)
         else:
             p.uncheck(selector, timeout=10000)
-        return f"Element '{selector}' set to checked={checked}."
+        return f"Set '{selector}' checked={want}."
     except PlaywrightError as e:
         return f"Check Error: {e}"
 
 
 def browser_press_key(key: str) -> str:
-    """Press a keyboard key (e.g., 'Enter', 'Escape', 'Tab', 'ArrowDown')."""
     p = get_page()
     try:
         p.keyboard.press(key)
-        return f"Pressed key '{key}'."
+        return f"Pressed '{key}'."
     except PlaywrightError as e:
         return f"Key Press Error: {e}"
 
 
-def browser_scroll(direction: str = "down", amount: int = 600) -> str:
-    """Scroll the active page up or down."""
+def browser_scroll(direction: str = "down", amount: str = "600") -> str:
     p = get_page()
-    delta_y = amount if direction.lower() == "down" else -amount
+    px = _int(amount, 600)
+    delta = px if direction.lower() == "down" else -px
     try:
-        p.mouse.wheel(0, delta_y)
-        p.wait_for_timeout(500)
-        return f"Scrolled {direction} by {amount}px."
+        p.mouse.wheel(0, delta)
+        p.wait_for_timeout(300)
+        return f"Scrolled {direction} by {px}px."
     except PlaywrightError as e:
         return f"Scroll Error: {e}"
 
 
 def browser_hover(selector: str) -> str:
-    """Hover over an element to trigger dropdowns or tooltips."""
     p = get_page()
     try:
         p.hover(selector, timeout=10000)
@@ -231,150 +313,154 @@ def browser_hover(selector: str) -> str:
 
 
 # =====================================================================
-# 3. Web Scraping
+# 3. Web scraping
 # =====================================================================
 
-def browser_extract_text(selector: str = "body", max_length: int = 3500) -> str:
-    """Extract visible inner text from an element or the entire page body."""
+def browser_extract_text(selector: str = "body", max_length: str = "4000") -> str:
     p = get_page()
+    limit = _int(max_length, 4000)
     try:
-        text = p.inner_text(selector, timeout=10000).strip()
-        if len(text) > max_length:
-            return text[:max_length] + f"\n... [Truncated, total {len(text)} chars]"
+        text = p.inner_text(selector or "body", timeout=10000).strip()
+        if len(text) > limit:
+            return text[:limit] + f"\n... [truncated, total {len(text)} chars]"
         return text or "(empty)"
     except PlaywrightError as e:
         return f"Extraction Error: {e}"
 
 
-def browser_extract_links(base_filter: Optional[str] = None, limit: int = 50) -> str:
-    """Extract hyperlinks from the page, returning text and URLs."""
+def browser_extract_links(filter_keyword: str = "", limit: str = "30") -> str:
     p = get_page()
     try:
         links = p.eval_on_selector_all(
             "a[href]",
-            """elements => elements.map(el => ({
-                text: el.innerText.trim(),
-                href: el.href
-            })).filter(x => x.href && !x.href.startsWith('javascript:'))"""
+            """els => els.map(a => ({
+                text: a.innerText.trim().replace(/\\s+/g, ' '),
+                href: a.href
+            })).filter(x => x.href && !x.href.startsWith('javascript:'))""",
         )
-        if base_filter:
-            links = [lk for lk in links if base_filter in lk["href"]]
-        links = links[:limit]
-        formatted = [f"- [{lk['text'] or 'link'}]({lk['href']})" for lk in links]
-        return "\n".join(formatted) or "No matching links found."
+        if filter_keyword and filter_keyword.strip():
+            kw = filter_keyword.lower().strip()
+            links = [l for l in links if kw in l["text"].lower() or kw in l["href"].lower()]
+        links = links[:_int(limit, 30)]
+        return "\n".join(f"- [{l['text'] or 'link'}]({l['href']})" for l in links) \
+            or "No matching links found."
     except PlaywrightError as e:
         return f"Extraction Error: {e}"
 
 
-def browser_extract_table(selector: str = "table", max_rows: int = 25) -> str:
-    """Extract an HTML <table> into structured Markdown table format."""
+def browser_extract_table(selector: str = "table", max_rows: str = "25") -> str:
     p = get_page()
+    limit = _int(max_rows, 25)
     try:
-        table_data = p.eval_on_selector(
-            selector,
-            """table => {
-                const rows = Array.from(table.querySelectorAll('tr'));
-                return rows.map(r => Array.from(r.querySelectorAll('th, td')).map(c => c.innerText.trim()));
-            }"""
+        rows = p.eval_on_selector(
+            selector or "table",
+            """t => Array.from(t.querySelectorAll('tr')).map(r =>
+                Array.from(r.querySelectorAll('th, td')).map(c => c.innerText.trim().replace(/\\s+/g, ' '))
+            )""",
         )
-        if not table_data:
+        if not rows:
             return "Table is empty or not found."
-
-        # Format as Markdown
-        headers = table_data[0]
-        divider = ["---"] * len(headers)
-        lines = ["| " + " | ".join(headers) + " |", "| " + " | ".join(divider) + " |"]
-
-        for row in table_data[1:max_rows]:
-            # Pad row if columns don't align
-            padded = row + [""] * (len(headers) - len(row))
+        headers = rows[0]
+        lines = [
+            "| " + " | ".join(headers) + " |",
+            "| " + " | ".join(["---"] * len(headers)) + " |",
+        ]
+        for r in rows[1:limit]:
+            padded = r + [""] * (len(headers) - len(r))
             lines.append("| " + " | ".join(padded[:len(headers)]) + " |")
-
-        if len(table_data) > max_rows:
-            lines.append(f"... ({len(table_data) - max_rows} additional rows omitted)")
-
+        if len(rows) > limit:
+            lines.append(f"... ({len(rows) - limit} more rows omitted)")
         return "\n".join(lines)
     except PlaywrightError as e:
         return f"Table Extraction Error: {e}"
 
 
 # =====================================================================
-# 4. Testing & Assertions
+# 4. Testing & assertions
 # =====================================================================
 
-def browser_assert_element(selector: str, state: str = "visible", timeout_ms: int = 5000) -> str:
-    """Assert an element exists in a given state ('visible', 'hidden', 'attached')."""
+def browser_assert_element(selector: str, state: str = "visible") -> str:
     p = get_page()
     try:
-        p.wait_for_selector(selector, state=state, timeout=timeout_ms)
+        p.wait_for_selector(selector, state=state, timeout=5000)
         return f"PASS: Element '{selector}' is {state}."
     except PlaywrightError:
-        return f"FAIL: Element '{selector}' failed assertion (not {state} within {timeout_ms}ms)."
+        return f"FAIL: Element '{selector}' is NOT {state}."
 
 
 def browser_assert_text(expected_text: str, selector: str = "body") -> str:
-    """Assert that the specified text is present inside an element or page."""
     p = get_page()
     try:
-        content = p.inner_text(selector, timeout=5000)
+        content = p.inner_text(selector or "body", timeout=5000)
         if expected_text in content:
-            return f"PASS: Found text '{expected_text}' inside '{selector}'."
-        return f"FAIL: Text '{expected_text}' not found in '{selector}'."
+            return f"PASS: Found '{expected_text}'."
+        return f"FAIL: '{expected_text}' not found."
     except PlaywrightError as e:
         return f"Assertion Error: {e}"
 
 
 def browser_get_console_errors() -> str:
-    """Return collected browser console JavaScript errors and failed network requests."""
     errors = _state.get("console_errors", [])
     failed = _state.get("failed_requests", [])
     report = []
     if errors:
         report.append("Console Errors:\n" + "\n".join(f"- {e}" for e in errors[-10:]))
     if failed:
-        report.append("Failed Network Requests:\n" + "\n".join(f"- {f}" for f in failed[-10:]))
-    return "\n\n".join(report) if report else "No console errors or failed requests recorded."
+        report.append("Failed Requests:\n" + "\n".join(f"- {f}" for f in failed[-10:]))
+    return "\n\n".join(report) if report else "PASS: No console errors or failed requests recorded."
 
 
 # =====================================================================
-# 5. Screenshots & PDFs
+# 5. Screenshots & PDF (always inside the workspace)
 # =====================================================================
 
-def browser_screenshot(path: str = "reports/screenshot.png", full_page: bool = True, selector: Optional[str] = None) -> str:
-    """Capture a screenshot of the entire page or a target element."""
+def browser_screenshot(path: str = "reports/screenshot.png", selector: str = "") -> str:
     p = get_page()
-    target = Path(path)
+    target = safe(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        if selector:
-            el = p.wait_for_selector(selector, timeout=10000)
+        if selector and selector.strip():
+            el = p.query_selector(selector.strip())
             if not el:
-                return f"Selector '{selector}' not found for screenshot."
+                return f"Selector '{selector}' not found."
             el.screenshot(path=str(target))
         else:
-            p.screenshot(path=str(target), full_page=full_page)
-        return f"Screenshot saved to: {target.as_posix()}"
+            p.screenshot(path=str(target), full_page=True)
+        return f"Screenshot saved: {target.relative_to(ROOT)}"
     except PlaywrightError as e:
         return f"Screenshot Error: {e}"
 
 
-def browser_export_pdf(path: str = "reports/page.pdf", format_size: str = "A4") -> str:
-    """Export the active page as a PDF file."""
+def browser_export_pdf(path: str = "reports/webpage.pdf") -> str:
     p = get_page()
-    target = Path(path)
+    target = safe(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        p.pdf(path=str(target), format=format_size, print_background=True)
-        return f"PDF exported to: {target.as_posix()}"
-    except PlaywrightError as e:
-        return f"PDF Export Error (ensure browser launched in headless mode): {e}"
+        p.pdf(path=str(target), print_background=True)
+        return f"PDF saved: {target.relative_to(ROOT)}"
+    except PlaywrightError:
+        # Chromium only prints PDFs in headless mode -> use a temporary headless browser
+        try:
+            hl = _state["pw"].chromium.launch(headless=True)
+            try:
+                pg = hl.new_page()
+                pg.goto(p.url, wait_until="networkidle", timeout=15000)
+                pg.pdf(path=str(target), print_background=True)
+            finally:
+                hl.close()
+            return f"PDF saved: {target.relative_to(ROOT)}"
+        except Exception as e:
+            return f"PDF export error: {e}"
 
 
 # =====================================================================
-# 6. LLM Tool Registry & Schema Definitions
+# 6. Tool registry (OpenAI/Groq function schemas)
 # =====================================================================
+# All parameters are declared as strings on purpose: models often send numbers
+# and booleans as strings, and strict schema validation would reject them.
+# The functions above convert them safely.
 
-def _make_schema(name: str, desc: str, props: Dict[str, Any], required: List[str]) -> Dict[str, Any]:
+def _schema(name: str, desc: str, props: Dict[str, str], required: List[str]) -> Dict[str, Any]:
     return {
         "type": "function",
         "function": {
@@ -382,7 +468,7 @@ def _make_schema(name: str, desc: str, props: Dict[str, Any], required: List[str
             "description": desc,
             "parameters": {
                 "type": "object",
-                "properties": props,
+                "properties": {k: {"type": "string", "description": d} for k, d in props.items()},
                 "required": required,
             },
         },
@@ -390,27 +476,50 @@ def _make_schema(name: str, desc: str, props: Dict[str, Any], required: List[str
 
 
 BROWSER_SCHEMAS = [
-    _make_schema("browser_open", "Open a website by URL", {"url": {"type": "string", "description": "Web address to open"}}, ["url"]),
-    _make_schema("browser_navigate", "Navigate page history: 'back', 'forward', or 'reload'", {"action": {"type": "string", "enum": ["back", "forward", "reload"]}}, ["action"]),
-    _make_schema("browser_wait", "Wait for an element or pause", {"timeout_ms": {"type": "integer", "description": "Time in ms"}, "selector": {"type": "string", "description": "CSS selector to wait for"}}, []),
-    _make_schema("browser_click", "Click a webpage element", {"selector": {"type": "string", "description": "CSS selector to click"}}, ["selector"]),
-    _make_schema("browser_fill", "Type text into an input or form", {"selector": {"type": "string", "description": "CSS selector of field"}, "text": {"type": "string", "description": "Text to enter"}}, ["selector", "text"]),
-    _make_schema("browser_select", "Select an option from a dropdown", {"selector": {"type": "string", "description": "Select CSS selector"}, "value": {"type": "string", "description": "Option value"}}, ["selector", "value"]),
-    _make_schema("browser_check", "Toggle a checkbox or radio button", {"selector": {"type": "string", "description": "CSS selector"}, "checked": {"type": "boolean", "description": "True to check, False to uncheck"}}, ["selector"]),
-    _make_schema("browser_press_key", "Press a key on the keyboard", {"key": {"type": "string", "description": "Key name like Enter, Tab, Escape"}}, ["key"]),
-    _make_schema("browser_scroll", "Scroll up or down on the page", {"direction": {"type": "string", "enum": ["down", "up"]}, "amount": {"type": "integer", "description": "Pixel scroll amount"}}, []),
-    _make_schema("browser_hover", "Hover mouse over an element", {"selector": {"type": "string", "description": "CSS selector"}}, ["selector"]),
-    _make_schema("browser_extract_text", "Extract readable text from page or element", {"selector": {"type": "string", "description": "CSS selector (default 'body')"}, "max_length": {"type": "integer", "description": "Maximum characters"}}, []),
-    _make_schema("browser_extract_links", "Extract hyperlinks from the page", {"base_filter": {"type": "string", "description": "Substring to filter URLs"}, "limit": {"type": "integer", "description": "Max links to return"}}, []),
-    _make_schema("browser_extract_table", "Extract HTML table to structured markdown", {"selector": {"type": "string", "description": "CSS selector for table"}}, []),
-    _make_schema("browser_assert_element", "Test if element is visible or hidden", {"selector": {"type": "string", "description": "CSS selector"}, "state": {"type": "string", "enum": ["visible", "hidden"]}}, ["selector"]),
-    _make_schema("browser_assert_text", "Test if expected text is present", {"expected_text": {"type": "string", "description": "Text to find"}, "selector": {"type": "string", "description": "CSS selector"}}, ["expected_text"]),
-    _make_schema("browser_get_console_errors", "Check for console JavaScript errors and failed requests", {}, []),
-    _make_schema("browser_screenshot", "Capture page or element screenshot", {"path": {"type": "string", "description": "File path (e.g. reports/shot.png)"}, "full_page": {"type": "boolean", "description": "Whether to capture full page"}, "selector": {"type": "string", "description": "Optional element selector"}}, []),
-    _make_schema("browser_export_pdf", "Export page as PDF file", {"path": {"type": "string", "description": "Target PDF path"}}, []),
+    _schema("search_web", "Search Google and return the result text",
+            {"query": "Search query"}, ["query"]),
+    _schema("browser_open", "Open a website URL in the browser",
+            {"url": "Web address"}, ["url"]),
+    _schema("browser_navigate", "Navigate history: 'back', 'forward' or 'reload'",
+            {"action": "back | forward | reload"}, ["action"]),
+    _schema("browser_wait", "Wait for a selector to appear, or pause",
+            {"selector": "CSS selector (optional)", "timeout_ms": "Milliseconds, e.g. 2000"}, []),
+    _schema("browser_click", "Click an element by CSS selector",
+            {"selector": "CSS selector"}, ["selector"]),
+    _schema("browser_fill", "Type text into an input by CSS selector",
+            {"selector": "CSS selector", "text": "Text to enter",
+             "clear_first": "'true' to replace existing text, 'false' to append"},
+            ["selector", "text"]),
+    _schema("browser_select", "Select an option in a <select> dropdown by value",
+            {"selector": "CSS selector", "value": "Option value"}, ["selector", "value"]),
+    _schema("browser_check", "Check or uncheck a checkbox/radio",
+            {"selector": "CSS selector", "checked": "'true' or 'false'"}, ["selector"]),
+    _schema("browser_press_key", "Press a keyboard key like Enter, Tab, Escape",
+            {"key": "Key name"}, ["key"]),
+    _schema("browser_scroll", "Scroll the page up or down",
+            {"direction": "up | down", "amount": "Pixels, e.g. 600"}, []),
+    _schema("browser_hover", "Hover the mouse over an element",
+            {"selector": "CSS selector"}, ["selector"]),
+    _schema("browser_extract_text", "Get visible text of the page or an element",
+            {"selector": "CSS selector (default body)", "max_length": "Max characters"}, []),
+    _schema("browser_extract_links", "Extract page links, optionally filtered by keyword",
+            {"filter_keyword": "Keyword to filter links", "limit": "Max links"}, []),
+    _schema("browser_extract_table", "Extract an HTML table as a markdown table",
+            {"selector": "CSS selector (default table)", "max_rows": "Max rows"}, []),
+    _schema("browser_assert_element", "Assert an element is 'visible', 'hidden' or 'attached'",
+            {"selector": "CSS selector", "state": "visible | hidden | attached"}, ["selector"]),
+    _schema("browser_assert_text", "Assert specific text is present on the page",
+            {"expected_text": "Text to find", "selector": "CSS selector (default body)"},
+            ["expected_text"]),
+    _schema("browser_get_console_errors", "Get recorded JS console errors and failed requests", {}, []),
+    _schema("browser_screenshot", "Capture a screenshot of the page or an element into the workspace",
+            {"path": "e.g. reports/shot.png", "selector": "Optional element selector"}, []),
+    _schema("browser_export_pdf", "Export the current page as a PDF into the workspace",
+            {"path": "e.g. reports/page.pdf"}, []),
 ]
 
 BROWSER_FUNCS = {
+    "search_web": search_web,
     "browser_open": browser_open,
     "browser_navigate": browser_navigate,
     "browser_wait": browser_wait,

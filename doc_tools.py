@@ -1,8 +1,3 @@
-"""Cross-format document tools: read templates/samples and export to PDF.
-
-Functions: read_document (.docx .xlsx .pptx .pdf .txt .md), export_pdf.
-REGISTRY lists (group, schema, function) for main.py.
-"""
 import os
 import shutil
 import subprocess

@@ -411,12 +411,13 @@ def excel_layout(path: str, sheet: str, options: str) -> str:
 
 
 def excel_design_report(path: str, output: str = "", sheet: str = "",
-                        title: str = "IMDb MOVIE DATABASE",
-                        subtitle: str = "2023 MOVIE RATINGS & ANALYSIS") -> str:
+                        title: str = "", subtitle: str = "") -> str:
     """One-call premium redesign of a data sheet. The original file is never modified."""
     src = safe(path)
     if src.suffix.lower() != ".xlsx" or not src.exists():
         raise ValueError(f"File not found: {path}")
+    title = title.strip() or src.stem.replace("_", " ").upper()
+    subtitle = subtitle.strip() or "DATA REPORT"
     dst = safe(output) if output else src.with_name(src.stem + "_Designed.xlsx")
     if dst.suffix.lower() != ".xlsx":
         raise ValueError("output must end with .xlsx")
@@ -427,7 +428,6 @@ def excel_design_report(path: str, output: str = "", sheet: str = "",
     rel = dst.relative_to(ROOT.resolve()).as_posix()
     status = "all checks passed" if res["ok"] else "SOME CHECKS FAILED"
     return f"Saved {rel} ({status}). " + "; ".join(res["checks"])
-
 
 # ---------- Registry ----------
 REGISTRY = [

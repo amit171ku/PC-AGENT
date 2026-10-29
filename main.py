@@ -10,7 +10,6 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote_plus
 
 import uvicorn
 from dotenv import load_dotenv
@@ -22,8 +21,8 @@ from fastapi import (FastAPI, File, HTTPException, Request, UploadFile,
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from groq import APIStatusError, Groq, RateLimitError
-from playwright.sync_api import sync_playwright
 
+import browser_tools
 import common
 import design_tools
 import doc_tools
@@ -143,7 +142,9 @@ def confirm(action: str) -> bool:
     return box["ok"]
 
 
+# One approval dialog for every module
 common.set_confirm_handler(confirm)
+browser_tools.set_confirm_handler(confirm)
 
 
 # ---------- Helpers ----------
@@ -194,294 +195,6 @@ def delete_file(path: str) -> str:
     return "Moved to trash."
 
 
-# ---------- Playwright Browser Tools ----------
-_b = {}
-_console_errors = []
-_failed_requests = []
-
-
-def page():
-    br = _b.get("browser")
-    pg = _b.get("page")
-    try:
-        if pg is not None and br is not None and br.is_connected() and not pg.is_closed():
-            return pg
-    except Exception:
-        pass
-    close_browser()
-    _b["pw"] = sync_playwright().start()
-
-    # Launch with anti-detection arguments
-    _b["browser"] = _b["pw"].chromium.launch(
-        headless=False,
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-infobars",
-            "--start-maximized",
-        ]
-    )
-    
-    # Create realistic browser context
-    context = _b["browser"].new_context(
-        viewport={"width": 1280, "height": 800},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    )
-    _b["page"] = context.new_page()
-
-    # Hide webdriver property from Google anti-bot scripts
-    _b["page"].add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-
-    # Track console errors & failed requests
-    _b["page"].on("console", lambda msg: _console_errors.append(msg.text) if msg.type == "error" else None)
-    _b["page"].on("requestfailed", lambda req: _failed_requests.append(f"{req.method} {req.url} - {req.failure}"))
-    return _b["page"]
-
-
-def close_browser():
-    try:
-        if "browser" in _b and _b["browser"]:
-            _b["browser"].close()
-        if "pw" in _b and _b["pw"]:
-            _b["pw"].stop()
-    except Exception:
-        pass
-    _b.clear()
-    _console_errors.clear()
-    _failed_requests.clear()
-
-
-# 1. Navigation & Browsing
-def search_web(query: str) -> str:
-    p = page()
-    google_url = f"https://www.google.com/search?q={quote_plus(query)}&hl=en"
-
-    try:
-        p.goto(google_url, wait_until="domcontentloaded", timeout=25000)
-
-        # Dismiss cookie/consent banner if present
-        for button_text in ["Accept all", "I agree", "Reject all", "Read all"]:
-            try:
-                btn = p.locator(f"button:has-text('{button_text}')").first
-                if btn.is_visible(timeout=1000):
-                    btn.click()
-                    p.wait_for_timeout(1000)
-                    break
-            except Exception:
-                pass
-
-        body_text = p.inner_text("body")
-
-        # Check if Google returned an anti-bot CAPTCHA block
-        is_blocked = any(phrase in body_text.lower() for phrase in [
-            "unusual traffic", "recaptcha", "solve the challenge", "bot detection", "robot"
-        ])
-
-        if not is_blocked:
-            try:
-                p.wait_for_selector("#search", timeout=3000)
-                results = p.locator("#search").inner_text()
-                if results and len(results.strip()) > 100:
-                    return results[:4000]
-            except Exception:
-                pass
-            if len(body_text.strip()) > 200:
-                return body_text[:4000]
-
-    except Exception:
-        pass
-
-    # ---------- SILENT FALLBACK (Bing) if Google is blocked ----------
-    print(f"[search] Google challenged; falling back to Bing for query: '{query}'")
-    try:
-        bing_url = f"https://www.bing.com/search?q={quote_plus(query)}&setlang=en"
-        p.goto(bing_url, wait_until="domcontentloaded", timeout=25000)
-        
-        # Grab main search results container
-        try:
-            results = p.locator("#b_results").inner_text(timeout=4000)
-            if results and len(results.strip()) > 100:
-                return results[:4000]
-        except Exception:
-            pass
-
-        return p.inner_text("body")[:4000]
-    except Exception as e:
-        return f"Search error: {e}"
-def open_url(url: str) -> str:
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
-    resp = page().goto(url, wait_until="domcontentloaded", timeout=30000)
-    status = resp.status if resp else "unknown"
-    return f"Opened: {page().title()} (Status: {status})"
-
-
-def navigate_browser(action: str) -> str:
-    p = page()
-    act = action.lower().strip()
-    if act == "back":
-        p.go_back(wait_until="domcontentloaded", timeout=15000)
-    elif act == "forward":
-        p.go_forward(wait_until="domcontentloaded", timeout=15000)
-    elif act == "reload":
-        p.reload(wait_until="domcontentloaded", timeout=15000)
-    else:
-        return f"Invalid action: '{action}'. Use 'back', 'forward', or 'reload'."
-    return f"Navigated {act}. Page: {p.title()} ({p.url})"
-
-
-def wait_for(selector: str = "", timeout_ms: str = "2000") -> str:
-    p = page()
-    ms = int(timeout_ms) if str(timeout_ms).isdigit() else 2000
-    if selector.strip():
-        p.wait_for_selector(selector.strip(), timeout=ms)
-        return f"Found '{selector}'."
-    p.wait_for_timeout(ms)
-    return f"Waited {ms}ms."
-
-
-# 2. Automation & Forms
-def click(selector: str) -> str:
-    if not confirm(f"Click: {selector}  on {page().url}"):
-        return "User denied."
-    page().click(selector, timeout=10000)
-    return "Clicked."
-
-
-def type_text(selector: str, text: str) -> str:
-    if any(w in selector.lower() for w in ("password", "card", "cvv", "secret", "ssn")):
-        return "Refused: safety filter prevents typing into sensitive fields."
-    if not confirm(f"Type: '{text}' into {selector}"):
-        return "User denied."
-    page().fill(selector, text)
-    return "Typed."
-
-
-def select_dropdown(selector: str, value: str) -> str:
-    if not confirm(f"Select '{value}' in {selector}"):
-        return "User denied."
-    page().select_option(selector, value=value, timeout=10000)
-    return f"Selected '{value}' in {selector}."
-
-
-def press_key(key: str) -> str:
-    page().keyboard.press(key)
-    return f"Pressed '{key}'."
-
-
-def scroll_page(direction: str = "down", amount: str = "600") -> str:
-    px = int(amount) if str(amount).isdigit() else 600
-    delta = px if direction.lower() == "down" else -px
-    page().mouse.wheel(0, delta)
-    page().wait_for_timeout(300)
-    return f"Scrolled {direction} by {px}px."
-
-
-def hover(selector: str) -> str:
-    page().hover(selector, timeout=10000)
-    return f"Hovered over {selector}."
-
-
-# 3. Web Scraping
-def get_page_text() -> str:
-    return page().inner_text("body")[:4000]
-
-
-def extract_links(filter_keyword: str = "") -> str:
-    p = page()
-    links = p.eval_on_selector_all(
-        "a[href]",
-        """els => els.map(a => ({
-            text: a.innerText.trim().replace(/\\s+/g, ' '),
-            href: a.href
-        })).filter(x => x.href && !x.href.startsWith('javascript:'))"""
-    )
-    if filter_keyword.strip():
-        kw = filter_keyword.lower().strip()
-        links = [l for l in links if kw in l["text"].lower() or kw in l["href"].lower()]
-    links = links[:30]
-    return "\n".join(f"- [{l['text'] or 'link'}]({l['href']})" for l in links) or "No links found."
-
-
-def extract_table(selector: str = "table") -> str:
-    p = page()
-    try:
-        rows = p.eval_on_selector(
-            selector,
-            """t => Array.from(t.querySelectorAll('tr')).map(r =>
-                Array.from(r.querySelectorAll('th, td')).map(c => c.innerText.trim().replace(/\\s+/g, ' '))
-            )"""
-        )
-        if not rows:
-            return "Table empty or not found."
-        headers = rows[0]
-        lines = ["| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
-        for r in rows[1:25]:
-            padded = r + [""] * (len(headers) - len(r))
-            lines.append("| " + " | ".join(padded[:len(headers)]) + " |")
-        if len(rows) > 25:
-            lines.append(f"... ({len(rows) - 25} more rows)")
-        return "\n".join(lines)
-    except Exception as e:
-        return f"Table extraction error: {e}"
-
-
-# 4. Automated Testing
-def test_element(selector: str, state: str = "visible") -> str:
-    try:
-        page().wait_for_selector(selector, state=state, timeout=5000)
-        return f"PASS: Element '{selector}' is {state}."
-    except Exception:
-        return f"FAIL: Element '{selector}' is NOT {state}."
-
-
-def test_text(expected_text: str) -> str:
-    content = page().inner_text("body")
-    return f"PASS: Found '{expected_text}'" if expected_text in content else f"FAIL: '{expected_text}' not found."
-
-
-def get_console_errors() -> str:
-    errs = []
-    if _console_errors:
-        errs.append("Console Errors:\n" + "\n".join(f"- {e}" for e in _console_errors[-10:]))
-    if _failed_requests:
-        errs.append("Failed Requests:\n" + "\n".join(f"- {f}" for f in _failed_requests[-10:]))
-    return "\n\n".join(errs) if errs else "PASS: No console errors or failed requests recorded."
-
-
-# 5. Screenshots & PDFs
-def take_screenshot(path: str = "reports/screenshot.png", selector: str = "") -> str:
-    p = safe(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    if selector.strip():
-        el = page().query_selector(selector.strip())
-        if not el:
-            return f"Selector '{selector}' not found."
-        el.screenshot(path=str(p))
-    else:
-        page().screenshot(path=str(p), full_page=True)
-    return f"Screenshot saved: {p.relative_to(ROOT)}"
-
-
-def export_pdf(path: str = "reports/webpage.pdf") -> str:
-    p = safe(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        page().pdf(path=str(p), print_background=True)
-        return f"PDF saved: {p.relative_to(ROOT)}"
-    except Exception:
-        # Fallback to headless context for PDF export
-        try:
-            hl = _b["pw"].chromium.launch(headless=True)
-            pg = hl.new_page()
-            pg.goto(page().url, wait_until="networkidle", timeout=15000)
-            pg.pdf(path=str(p), print_background=True)
-            hl.close()
-            return f"PDF saved: {p.relative_to(ROOT)}"
-        except Exception as e:
-            return f"PDF export error: {e}"
-
-
 # ---------- Ask user question ----------
 def ask_user(question: str) -> str:
     qid = uuid.uuid4().hex
@@ -498,17 +211,8 @@ CORE_FUNCS = {
     # Files
     "list_dir": list_dir, "read_file": read_file, "search_files": search_files,
     "write_file": write_file, "move_file": move_file, "delete_file": delete_file,
-    # Browsing & Navigation
-    "search_web": search_web, "open_url": open_url, "navigate_browser": navigate_browser, "wait_for": wait_for,
-    # Automation
-    "click": click, "type_text": type_text, "select_dropdown": select_dropdown,
-    "press_key": press_key, "scroll_page": scroll_page, "hover": hover,
-    # Scraping
-    "get_page_text": get_page_text, "extract_links": extract_links, "extract_table": extract_table,
-    # Testing
-    "test_element": test_element, "test_text": test_text, "get_console_errors": get_console_errors,
-    # Visual & Export
-    "take_screenshot": take_screenshot, "export_pdf": export_pdf,
+    # Browser tools live in browser_tools.py
+    **browser_tools.BROWSER_FUNCS,
 }
 
 ASK_SCHEMA = tool("ask_user", "Ask the user clarifying questions and wait. ONE call, short numbered list.",
@@ -533,30 +237,7 @@ TOOLS_CORE = [
     tool("write_file", "Create or overwrite a text file", ["path", "content"], ["path", "content"]),
     tool("move_file", "Move or rename a file", ["src", "dst"], ["src", "dst"]),
     tool("delete_file", "Delete a file (moved to trash)", ["path"], ["path"]),
-    # Navigation
-    tool("search_web", "Search Google and return text results", ["query"], ["query"]),
-    tool("open_url", "Open a website URL in browser", ["url"], ["url"]),
-    tool("navigate_browser", "Navigate page history ('back', 'forward', 'reload')", ["action"], ["action"]),
-    tool("wait_for", "Wait for element or pause (selector, timeout_ms)", ["selector", "timeout_ms"], []),
-    # Automation
-    tool("click", "Click an element by CSS selector", ["selector"], ["selector"]),
-    tool("type_text", "Type into an input by CSS selector", ["selector", "text"], ["selector", "text"]),
-    tool("select_dropdown", "Select option from <select> dropdown by value", ["selector", "value"], ["selector", "value"]),
-    tool("press_key", "Press keyboard key ('Enter', 'Tab', 'Escape')", ["key"], ["key"]),
-    tool("scroll_page", "Scroll page ('up' or 'down', amount px)", ["direction", "amount"], []),
-    tool("hover", "Hover mouse over element by CSS selector", ["selector"], ["selector"]),
-    # Scraping
-    tool("get_page_text", "Get visible text of current page", [], []),
-    tool("extract_links", "Extract page links (optionally filtered by keyword)", ["filter_keyword"], []),
-    tool("extract_table", "Extract HTML table as markdown", ["selector"], []),
-    # Testing
-    tool("test_element", "Assert element is 'visible' or 'hidden'", ["selector", "state"], ["selector"]),
-    tool("test_text", "Assert specific text is present on page", ["expected_text"], ["expected_text"]),
-    tool("get_console_errors", "Get recorded JS console errors and failed network requests", [], []),
-    # Visual & Export
-    tool("take_screenshot", "Capture page or element screenshot to workspace", ["path", "selector"], ["path"]),
-    tool("export_pdf", "Export current page as PDF to workspace", ["path"], ["path"]),
-]
+] + browser_tools.BROWSER_SCHEMAS
 
 GROUP_RE = {
     "excel": re.compile(r"excel|xlsx|spreadsheet|sheet|workbook|budget|tracker|cell|column|conditional|highlight|kpi|dashboard", re.I),
@@ -577,18 +258,19 @@ OFFICE_RE = re.compile(
     re.I)
 
 BASE_PROMPT = (
-     f"You are a PC assistant. Workspace folder: {ROOT} (always use relative paths). "
+    f"You are a PC assistant. Workspace folder: {ROOT} (always use relative paths). "
     "Folders: templates/ holds the user's samples and templates; reports/ is where finished files go. "
     "\nCRITICAL SEARCH RULE: Whenever the user asks to search, find websites, look up news, or check current info, "
     "you MUST call `search_web(query='...')` directly. "
-    "NEVER call open_url('https://google.com') and NEVER try to type or click into Google's search box manually. "
+    "NEVER call browser_open('https://google.com') and NEVER try to type or click into Google's search box manually. "
     "`search_web` automatically performs the search and returns results to you. "
+    "Browser tools are named browser_* (browser_open, browser_click, browser_fill, browser_extract_text, ...). "
     "Keep replies short and never bypass confirmations."
 )
 
 OFFICE_PROMPT = (
     "\nDOCUMENT WORK: Pick Word (.docx) for reports/proposals, Excel (.xlsx) for budgets/data, "
-    "PowerPoint (.pptx) for presentations. export_pdf only when requested.\n\n"
+    "PowerPoint (.pptx) for presentations. browser_export_pdf only when requested.\n\n"
     "CRITICAL POWERPOINT DESIGN RULES (NEVER MAKE GENERIC BULLET WALLS):\n"
     "A professional deck MUST use diverse graphic layouts across slides:\n"
     "1. TITLE SLIDE: Call ppt_start(title, subtitle, category).\n"
@@ -731,7 +413,7 @@ def worker():
     while True:
         text = cmd_q.get()
         if text is None:
-            close_browser()
+            browser_tools.close_browser()
             break
         if text == "__RESET__":
             office = False

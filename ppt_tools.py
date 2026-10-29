@@ -1,8 +1,3 @@
-"""
-ppt_tools.py - Intelligent Executive PowerPoint Generator & Restyler.
-Automatically converts text and bullets into modern consulting cards, grids, KPIs, and charts.
-"""
-
 import math
 import os
 import re
@@ -28,9 +23,9 @@ from common import (
     tool,
 )
 
-# =====================================================================
+
 # Executive Design System & Palette (McKinsey / Apple Keynote Style)
-# =====================================================================
+
 SLATE_900  = PRGB(0x0F, 0x17, 0x2A)   # #0F172A - Dominant dark
 NAVY_CARD  = PRGB(0x1E, 0x29, 0x3B)   # #1E293B - Card fill / headers
 BLUE_ACCENT= PRGB(0x25, 0x63, 0xEB)   # #2563EB - Royal Brand Blue
@@ -52,9 +47,9 @@ SLIDE_HEIGHT = 7.5
 MAX_TABLE_COLUMNS = 8
 MAX_TABLE_ROWS = 12
 
-# =====================================================================
+# 
 # Safe Persistence & Integrity
-# =====================================================================
+# 
 
 def _validate_title(value, field="Title"):
     if not isinstance(value, str) or not value.strip():
@@ -88,9 +83,9 @@ def _open_presentation(path):
         raise ValueError(f"Cannot open PowerPoint '{path}': {exc}") from exc
 
 
-# =====================================================================
+# 
 # Graphic Primitives
-# =====================================================================
+# 
 
 def _set_background(slide, color=WHITE):
     slide.background.fill.solid()
@@ -161,9 +156,9 @@ def _add_footer(slide, slide_number=None):
         r.font.color.rgb = TEXT_MUTED
 
 
-# =====================================================================
+# 
 # Slide Builders
-# =====================================================================
+# 
 
 def ppt_start(path: str, title: str, subtitle: str = "", category: str = "EXECUTIVE BRIEF") -> str:
     """Create a high-impact title slide with modern dark-mode typography."""
@@ -535,9 +530,9 @@ def ppt_add_chart_slide(path: str, title: str, chart_type: str, labels: str, val
     return f"Designed {chart_type} chart slide added."
 
 
-# =====================================================================
+# 
 # Tool Registry
-# =====================================================================
+# 
 
 REGISTRY = [
     (
