@@ -1,0 +1,134 @@
+.msg.agent .body-wrap { max-width: calc(100% - 44px); }
+.msg.agent .bubble { max-width: 100%; line-height: 1.65; }
+
+/* ---------- rhythm: consistent spacing between blocks ---------- */
+.msg.agent .bubble > * { margin: 0; }
+.msg.agent .bubble > * + * { margin-top: 12px; }
+.msg.agent .bubble > h1 + *,
+.msg.agent .bubble > h2 + *,
+.msg.agent .bubble > h3 + *,
+.msg.agent .bubble > h4 + * { margin-top: 6px; }
+
+.msg.agent .bubble p { white-space: normal; }
+
+/* ---------- headings ---------- */
+.msg.agent .bubble h1,
+.msg.agent .bubble h2,
+.msg.agent .bubble h3,
+.msg.agent .bubble h4,
+.msg.agent .bubble h5,
+.msg.agent .bubble h6 { line-height: 1.3; font-weight: 700; color: var(--text); }
+.msg.agent .bubble > * + h1,
+.msg.agent .bubble > * + h2 { margin-top: 20px; }
+.msg.agent .bubble > * + h3,
+.msg.agent .bubble > * + h4,
+.msg.agent .bubble > * + h5,
+.msg.agent .bubble > * + h6 { margin-top: 16px; }
+.msg.agent .bubble h1 { font-size: 20px; }
+.msg.agent .bubble h2 { font-size: 18px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+.msg.agent .bubble h3 { font-size: 16px; }
+.msg.agent .bubble h4,
+.msg.agent .bubble h5,
+.msg.agent .bubble h6 { font-size: 15px; color: var(--accent-text); }
+
+/* ---------- lists ---------- */
+.msg.agent .bubble ul,
+.msg.agent .bubble ol { padding-left: 1.5em; }
+.msg.agent .bubble ul { list-style: disc; }
+.msg.agent .bubble ul ul { list-style: circle; }
+.msg.agent .bubble ul ul ul { list-style: square; }
+.msg.agent .bubble ol { list-style: decimal; }
+.msg.agent .bubble li { margin: 0; padding-left: 2px; }
+.msg.agent .bubble li + li { margin-top: 5px; }
+.msg.agent .bubble li > ul,
+.msg.agent .bubble li > ol { margin-top: 5px; }
+.msg.agent .bubble li::marker { color: var(--accent-text); }
+
+/* ---------- inline ---------- */
+.msg.agent .bubble strong { font-weight: 700; }
+.msg.agent .bubble em { font-style: italic; }
+.msg.agent .bubble del { opacity: .7; }
+.msg.agent .bubble a.md-link {
+  color: var(--accent-text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  word-break: break-word;
+}
+.msg.agent .bubble a.md-link:hover { text-decoration-thickness: 2px; }
+.msg.agent .bubble code.inline {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 6px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: .88em;
+}
+
+/* ---------- code blocks ---------- */
+.md-code {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.md-code-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 6px 4px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .06em;
+}
+.md-code-copy {
+  background: transparent; border: none; color: var(--muted);
+  font-size: 11px; padding: 2px 8px; border-radius: 6px;
+}
+.md-code-copy:hover { color: var(--accent-text); background: var(--accent-soft); }
+.md-code pre {
+  margin: 0; padding: 12px 14px; overflow-x: auto;
+  background: transparent; border: none; border-radius: 0;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px; line-height: 1.55; white-space: pre;
+}
+
+/* ---------- tables ---------- */
+.md-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.md-table th,
+.md-table td {
+  padding: 9px 12px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+}
+.md-table th + th,
+.md-table td + td { border-left: 1px solid var(--border); }
+.md-table thead th {
+  background: var(--surface-2);
+  font-weight: 650;
+  white-space: nowrap;
+  border-bottom: 2px solid var(--border);
+}
+.md-table tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--surface-2) 45%, transparent); }
+.md-table tbody tr:last-child td { border-bottom: none; }
+.md-table td { min-width: 90px; }
+
+/* ---------- quote, rule ---------- */
+.msg.agent .bubble blockquote {
+  padding: 4px 14px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 0 8px 8px 0;
+  color: var(--text);
+}
+.msg.agent .bubble blockquote > * + * { margin-top: 8px; }
+.msg.agent .bubble hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }

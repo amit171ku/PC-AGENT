@@ -113,8 +113,13 @@ function addMessage(text, kind) {
 
   const bubble = document.createElement("div");
   bubble.className = "bubble";
-  if (kind === "agent") renderRich(bubble, text);
-  else bubble.textContent = text;
+  if (kind === "agent" && typeof window.renderMarkdown === "function") {
+    window.renderMarkdown(bubble, text);
+} else if (kind === "agent") {
+    renderRich(bubble, text);
+} else {
+    bubble.textContent = text;
+}
   wrap.appendChild(bubble);
 
   // Download buttons for any files from reports/ mentioned in the reply
