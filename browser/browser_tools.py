@@ -1,5 +1,10 @@
+import ipaddress
+import os
+import socket
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
@@ -19,7 +24,8 @@ _state: Dict[str, Any] = {
 # Confirmation callback: fn(prompt_text) -> bool
 _confirm_callback: Optional[Callable[[str], bool]] = None
 
-SENSITIVE_WORDS = ("password", "passwd", "card", "cvv", "secret", "ssn")
+SENSITIVE_WORDS = ("password", "passwd", "pwd", "card", "cvv", "cvc", "secret", "ssn")
+MAX_LOG_ITEMS = 100
 
 
 def set_confirm_handler(fn: Callable[[str], bool]):
@@ -51,6 +57,113 @@ def _bool(value, default: bool = True) -> bool:
     return str(value).strip().lower() not in ("false", "0", "no", "off", "")
 
 
+# ---------- URL safety ----------
+def _allow_private() -> bool:
+    return os.getenv("BROWSER_ALLOW_PRIVATE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _blocked_reason(url: str) -> str:
+    """Return a reason string if the URL must not be opened, or '' if it is fine.
+
+    Blocks non-http(s) schemes and hosts that resolve to local/private network
+    addresses (localhost, 192.168.x.x, 10.x.x.x, 169.254.x.x cloud metadata, ...).
+    Set BROWSER_ALLOW_PRIVATE=1 in .env to allow private addresses.
+    """
+    try:
+        parts = urlparse(url)
+    except ValueError:
+        return "Blocked: invalid URL."
+    if parts.scheme not in ("http", "https"):
+        return f"Blocked: scheme '{parts.scheme}' is not allowed (only http/https)."
+    host = parts.hostname
+    if not host:
+        return "Blocked: URL has no host."
+    if _allow_private():
+        return ""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return ""  # DNS failure: the browser will report it itself
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        except ValueError:
+            continue
+        if ip.version == 6 and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified):
+            return f"Blocked: '{host}' points to a local/private network address ({ip})."
+    return ""
+
+
+def _route_guard(route, request):
+    """Checks every page navigation (including redirects) against _blocked_reason."""
+    reason = ""
+    try:
+        if request.is_navigation_request():
+            reason = _blocked_reason(request.url)
+    except Exception:
+        reason = "Blocked: URL check failed."
+    if reason:
+        print(f"[browser] {reason} ({request.url[:120]})")
+        route.abort()
+    else:
+        route.continue_()
+
+
+def _field_problem(p, selector: str) -> str:
+    """Inspect the real element (not just the selector text). Returns a reason if sensitive."""
+    try:
+        info = p.locator(selector).first.evaluate(
+            """el => ({
+                type: (el.getAttribute('type') || '').toLowerCase(),
+                autocomplete: (el.getAttribute('autocomplete') || '').toLowerCase(),
+                attrs: [el.name, el.id, el.placeholder, el.getAttribute('aria-label')]
+                        .join(' ').toLowerCase()
+            })""",
+            timeout=5000,
+        )
+    except PlaywrightError:
+        return ""  # element missing: the fill itself will report the error
+    if info.get("type") == "password":
+        return "password field"
+    ac = info.get("autocomplete", "")
+    if ac.startswith("cc-") or "one-time-code" in ac or "password" in ac:
+        return f"sensitive autocomplete field ({ac})"
+    if any(w in info.get("attrs", "") for w in SENSITIVE_WORDS):
+        return "sensitive field name"
+    return ""
+
+
+# ---------- Output paths ----------
+def _unique_path(target: Path) -> Path:
+    """Never overwrite an existing file: add a timestamp if the name is taken."""
+    if not target.exists():
+        return target
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    cand = target.with_name(f"{target.stem}_{stamp}{target.suffix}")
+    n = 1
+    while cand.exists():
+        cand = target.with_name(f"{target.stem}_{stamp}_{n}{target.suffix}")
+        n += 1
+    return cand
+
+
+# ---------- Browser lifecycle ----------
+def _on_console(msg):
+    if msg.type == "error":
+        errs = _state["console_errors"]
+        errs.append(msg.text)
+        del errs[:-MAX_LOG_ITEMS]
+
+
+def _on_request_failed(req):
+    fails = _state["failed_requests"]
+    fails.append(f"{req.method} {req.url} - {req.failure}")
+    del fails[:-MAX_LOG_ITEMS]
+
+
 def get_page():
     """Lazily start Chromium and return the active Page (restarts if closed)."""
     pg = _state.get("page")
@@ -64,14 +177,18 @@ def get_page():
     close_browser()
 
     pw = sync_playwright().start()
+    args = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        "--start-maximized",
+    ]
+    # The Chromium sandbox is a security feature. Only disable it if you really must
+    # (for example when running as root in Docker): set BROWSER_NO_SANDBOX=1 in .env.
+    if os.getenv("BROWSER_NO_SANDBOX", "").strip().lower() in ("1", "true", "yes", "on"):
+        args.append("--no-sandbox")
     browser = pw.chromium.launch(
         headless=False,  # visible window (as described in the README)
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-infobars",
-            "--start-maximized",
-        ],
+        args=args,
     )
     context = browser.new_context(
         viewport={"width": 1280, "height": 800},
@@ -80,20 +197,15 @@ def get_page():
             "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         ),
     )
+    context.route("**/*", _route_guard)   # block navigation to local/private addresses
     page = context.new_page()
     page.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
 
     # Track console errors and failed requests for testing/debugging
-    page.on(
-        "console",
-        lambda msg: _state["console_errors"].append(msg.text) if msg.type == "error" else None,
-    )
-    page.on(
-        "requestfailed",
-        lambda req: _state["failed_requests"].append(f"{req.method} {req.url} - {req.failure}"),
-    )
+    page.on("console", _on_console)
+    page.on("requestfailed", _on_request_failed)
 
     _state.update({"pw": pw, "browser": browser, "context": context, "page": page})
     return page
@@ -143,10 +255,11 @@ def search_web(query: str) -> str:
                 pass
 
         body_text = p.inner_text("body")
+        # "robot" alone is NOT used: normal results about robots would trigger the fallback.
         blocked = any(
             phrase in body_text.lower()
             for phrase in ("unusual traffic", "recaptcha", "solve the challenge",
-                           "bot detection", "robot")
+                           "not a robot", "bot detection")
         )
 
         if not blocked:
@@ -182,8 +295,12 @@ def search_web(query: str) -> str:
 
 def browser_open(url: str) -> str:
     """Navigate to a URL and wait for the DOM to load."""
+    url = (url or "").strip()
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
+    reason = _blocked_reason(url)
+    if reason:
+        return reason
     try:
         p = get_page()
         resp = p.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -244,7 +361,10 @@ def browser_fill(selector: str, text: str, clear_first: str = "true") -> str:
     if any(w in selector.lower() for w in SENSITIVE_WORDS):
         return "Refused: safety filter prevents typing into sensitive fields."
     p = get_page()
-    if not _require_confirm(f"Type: '{text}' into {selector}"):
+    problem = _field_problem(p, selector)
+    if problem:
+        return f"Refused: safety filter prevents typing into a {problem}."
+    if not _require_confirm(f"Type: '{text[:200]}' into {selector} on {p.url}"):
         return "User denied."
     try:
         if _bool(clear_first):
@@ -284,6 +404,8 @@ def browser_check(selector: str, checked: str = "true") -> str:
 
 def browser_press_key(key: str) -> str:
     p = get_page()
+    if not _require_confirm(f"Press key '{key}' on {p.url}"):
+        return "User denied."
     try:
         p.keyboard.press(key)
         return f"Pressed '{key}'."
@@ -411,12 +533,15 @@ def browser_get_console_errors() -> str:
 
 
 # =====================================================================
-# 5. Screenshots & PDF (always inside the workspace)
+# 5. Screenshots & PDF (always inside the workspace, never overwrite)
 # =====================================================================
 
 def browser_screenshot(path: str = "reports/screenshot.png", selector: str = "") -> str:
     p = get_page()
     target = safe(path)
+    if target.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+        target = target.with_suffix(".png")
+    target = _unique_path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         if selector and selector.strip():
@@ -426,7 +551,7 @@ def browser_screenshot(path: str = "reports/screenshot.png", selector: str = "")
             el.screenshot(path=str(target))
         else:
             p.screenshot(path=str(target), full_page=True)
-        return f"Screenshot saved: {target.relative_to(ROOT)}"
+        return f"Screenshot saved: {target.relative_to(ROOT).as_posix()}"
     except PlaywrightError as e:
         return f"Screenshot Error: {e}"
 
@@ -434,12 +559,18 @@ def browser_screenshot(path: str = "reports/screenshot.png", selector: str = "")
 def browser_export_pdf(path: str = "reports/webpage.pdf") -> str:
     p = get_page()
     target = safe(path)
+    if target.suffix.lower() != ".pdf":
+        target = target.with_suffix(".pdf")
+    target = _unique_path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         p.pdf(path=str(target), print_background=True)
-        return f"PDF saved: {target.relative_to(ROOT)}"
+        return f"PDF saved: {target.relative_to(ROOT).as_posix()}"
     except PlaywrightError:
         # Chromium only prints PDFs in headless mode -> use a temporary headless browser
+        reason = _blocked_reason(p.url)
+        if reason:
+            return reason
         try:
             hl = _state["pw"].chromium.launch(headless=True)
             try:
@@ -448,7 +579,7 @@ def browser_export_pdf(path: str = "reports/webpage.pdf") -> str:
                 pg.pdf(path=str(target), print_background=True)
             finally:
                 hl.close()
-            return f"PDF saved: {target.relative_to(ROOT)}"
+            return f"PDF saved: {target.relative_to(ROOT).as_posix()}"
         except Exception as e:
             return f"PDF export error: {e}"
 
@@ -478,7 +609,7 @@ def _schema(name: str, desc: str, props: Dict[str, str], required: List[str]) ->
 BROWSER_SCHEMAS = [
     _schema("search_web", "Search Google and return the result text",
             {"query": "Search query"}, ["query"]),
-    _schema("browser_open", "Open a website URL in the browser",
+    _schema("browser_open", "Open a website URL in the browser (http/https only, no local/private addresses)",
             {"url": "Web address"}, ["url"]),
     _schema("browser_navigate", "Navigate history: 'back', 'forward' or 'reload'",
             {"action": "back | forward | reload"}, ["action"]),
@@ -486,7 +617,7 @@ BROWSER_SCHEMAS = [
             {"selector": "CSS selector (optional)", "timeout_ms": "Milliseconds, e.g. 2000"}, []),
     _schema("browser_click", "Click an element by CSS selector",
             {"selector": "CSS selector"}, ["selector"]),
-    _schema("browser_fill", "Type text into an input by CSS selector",
+    _schema("browser_fill", "Type text into an input by CSS selector (password/card fields are refused)",
             {"selector": "CSS selector", "text": "Text to enter",
              "clear_first": "'true' to replace existing text, 'false' to append"},
             ["selector", "text"]),

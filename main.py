@@ -20,7 +20,7 @@ from fastapi import (FastAPI, File, HTTPException, Request, UploadFile,
                      WebSocket, WebSocketDisconnect)
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from groq import APIStatusError, Groq, RateLimitError
+from groq import APIConnectionError, APIStatusError, Groq, RateLimitError
 
 from browser import browser_tools
 import common
@@ -39,7 +39,10 @@ MAX_STEPS = 40
 UPLOAD_EXT = {".docx", ".xlsx", ".pptx", ".pdf", ".txt", ".md", ".csv",
               ".png", ".jpg", ".jpeg"}
 
-client = Groq(api_key=os.environ["GROQ_API_KEY"])
+API_KEY = os.getenv("GROQ_API_KEY", "")
+# max_retries=0: SDK does not retry silently; our own fallback logic handles it.
+# A dummy key is used if missing so that importing this module never crashes.
+client = Groq(api_key=API_KEY or "missing-key", timeout=60, max_retries=0)
 
 CHAT_SKIP = ("guard", "whisper", "tts", "orpheus", "embed", "allam")
 _blocked = {}                 # model -> time when it can be used again (rate limited)
@@ -80,8 +83,14 @@ def build_model_list():
     return out or chat
 
 
-MODELS = build_model_list()
-print("Models in priority order:", MODELS)
+MODELS = []   # filled by init_models() at server startup, NOT at import time
+
+
+def configured_models():
+    """Used when Groq's model list cannot be fetched (offline / API error)."""
+    raw = os.getenv("GROQ_MODELS", "") or os.getenv("GROQ_MODEL", "")
+    out = [m.strip() for m in raw.split(",") if m.strip()]
+    return out or ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
 
 
 def verify_models():
@@ -101,15 +110,44 @@ def verify_models():
             print("Rate limited right now (will retry later):", m)
             if not _current["name"]:
                 _current["name"] = m
+        except APIConnectionError:
+            # Network problem: do NOT mark models as dead, just stop verifying.
+            print("[models] Cannot reach Groq right now. Models will be tried on first request.")
+            break
+        except APIStatusError as e:
+            if e.status_code == 401:
+                print("[models] Invalid GROQ_API_KEY. Check your .env file.")
+                break
+            if e.status_code >= 500:
+                print("[models] Groq service error while verifying", m, "(will retry on request)")
+                continue
+            _dead[m] = str(e)[:80]
+            print("Skipped", m, "->", str(e)[:90])
         except Exception as e:
             _dead[m] = str(e)[:80]
             print("Skipped", m, "->", str(e)[:90])
     if not _current["name"]:
-        raise SystemExit("No model with tool calling found. Check GROQ_MODELS in .env.")
+        alive = [m for m in MODELS if m not in _dead]
+        if alive:
+            _current["name"] = alive[0]
+            print("[models] Could not verify any model. Will try them on first request.")
+        else:
+            print("[models] No model with tool calling found. Check GROQ_MODELS in .env.")
 
 
-verify_models()
-MODEL = _current["name"]
+def init_models():
+    """Called once from FastAPI startup. Never crashes the app."""
+    global MODELS
+    if not API_KEY:
+        print("[models] GROQ_API_KEY is missing in .env. Chat will not work until you add it.")
+    try:
+        MODELS = build_model_list()
+    except Exception as e:
+        print("[models] Could not fetch model list:", str(e)[:100])
+        MODELS = configured_models()
+    print("Models in priority order:", MODELS)
+    verify_models()
+
 
 # ---------- Messaging between worker thread and browser UI ----------
 cmd_q = queue.Queue()
@@ -171,28 +209,49 @@ def search_files(pattern: str) -> str:
 
 
 def write_file(path: str, content: str) -> str:
-    if not confirm(f"Write file: {path}"):
-        return "User denied."
     p = safe(path)
+
+    if p.exists():
+        return "Error: File already exists. Choose another filename."
+
+    if not confirm(f"Create file: {path}"):
+        return "User denied."
+
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
-    return "Written."
+
+    return "File created successfully."
 
 
 def move_file(src: str, dst: str) -> str:
+    s, d = safe(src), safe(dst)
+    if not s.exists():
+        return "Error: Source not found."
+    if d.exists():
+        return "Error: Destination already exists. Choose another name."
     if not confirm(f"Move: {src}  ->  {dst}"):
         return "User denied."
-    d = safe(dst)
     d.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(safe(src)), str(d))
+    shutil.move(str(s), str(d))
     return "Moved."
 
 
 def delete_file(path: str) -> str:
-    if not confirm(f"Delete (moves to .trash): {path}"):
+    p = safe(path)
+
+    if not p.is_file():
+        return "Error: File not found."
+
+    if not confirm(f"Move to trash: {path}"):
         return "User denied."
-    shutil.move(str(safe(path)), str(TRASH / Path(path).name))
-    return "Moved to trash."
+
+    TRASH.mkdir(parents=True, exist_ok=True)
+
+    target = TRASH / f"{uuid.uuid4().hex}_{p.name}"
+
+    shutil.move(str(p), str(target))
+
+    return "Moved to trash successfully."
 
 
 # ---------- Ask user question ----------
@@ -234,8 +293,8 @@ TOOLS_CORE = [
     tool("list_dir", "List files in a workspace folder", ["path"], []),
     tool("read_file", "Read a small text file", ["path"], ["path"]),
     tool("search_files", "Find files by glob pattern", ["pattern"], ["pattern"]),
-    tool("write_file", "Create or overwrite a text file", ["path", "content"], ["path", "content"]),
-    tool("move_file", "Move or rename a file", ["src", "dst"], ["src", "dst"]),
+    tool("write_file", "Create a NEW text file (fails if the file already exists)", ["path", "content"], ["path", "content"]),
+    tool("move_file", "Move or rename a file (fails if destination exists)", ["src", "dst"], ["src", "dst"]),
     tool("delete_file", "Delete a file (moved to trash)", ["path"], ["path"]),
 ] + browser_tools.BROWSER_SCHEMAS
 
@@ -320,6 +379,7 @@ def _switch(model, why):
 
 def chat_call(messages, tools):
     shrunk, skip = False, set()
+    transient = 0                       # network / 5xx failures in this request
     reason = "preferred model is available again"
     for _ in range(14):
         now = time.time()
@@ -351,8 +411,24 @@ def chat_call(messages, tools):
             reason = f"{model} hit its limit"
             print(f"[limit] {model} blocked for {secs:.0f}s")
             continue
+        except APIConnectionError:      # network down or timeout (APITimeoutError is a subclass)
+            transient += 1
+            if transient > 3:
+                raise RuntimeError("Cannot reach Groq. Check your internet connection.")
+            print(f"[net] connection problem, retry {transient}/3")
+            time.sleep(2 * transient)
+            continue
         except APIStatusError as e:
             msg = str(e).lower()
+            if e.status_code == 401:
+                raise RuntimeError("Invalid GROQ_API_KEY. Check your .env file.")
+            if e.status_code >= 500:
+                transient += 1
+                if transient > 3:
+                    raise RuntimeError("Groq service is unavailable. Try again shortly.")
+                print(f"[groq] server error {e.status_code}, retry {transient}/3")
+                time.sleep(2 * transient)
+                continue
             if e.status_code == 413 and not shrunk:
                 compact(messages, tail=0, tool_tail=0, limit=400)
                 shrunk = True
@@ -441,6 +517,8 @@ def worker():
 async def lifespan(app):
     global loop
     loop = asyncio.get_running_loop()
+    # Model discovery runs here (in a thread) so a Groq outage cannot block or crash startup.
+    await asyncio.to_thread(init_models)
     threading.Thread(target=worker, daemon=True).start()
     yield
     cmd_q.put(None)
@@ -515,8 +593,11 @@ async def upload(request: Request, file: UploadFile = File(...)):
     data = await file.read()
     if len(data) > 15 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File is larger than 15 MB")
-    (ROOT / "templates" / name).write_bytes(data)
-    return {"saved": f"templates/{name}"}
+    # Unique prefix so an upload can never overwrite an existing file
+    target = ROOT / "templates" / f"{uuid.uuid4().hex[:8]}_{name}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    return {"saved": target.relative_to(ROOT).as_posix()}
 
 
 @app.websocket("/ws")

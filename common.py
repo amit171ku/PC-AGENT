@@ -4,7 +4,8 @@ import re
 from pathlib import Path
 
 # The ONLY folder the agent can touch. Override with the AGENT_WORKSPACE environment variable.
-ROOT = Path(os.getenv("AGENT_WORKSPACE") or (Path.home() / "AgentWorkspace"))
+# expanduser() handles "~", resolve() makes the path absolute so safe() comparisons are consistent.
+ROOT = Path(os.getenv("AGENT_WORKSPACE") or (Path.home() / "AgentWorkspace")).expanduser().resolve()
 TRASH = ROOT / ".trash"
 LOG = ROOT / "agent_log.txt"
 for _d in (ROOT, TRASH, ROOT / "templates", ROOT / "reports"):
@@ -27,7 +28,7 @@ def confirm(action: str) -> bool:
 def safe(path: str) -> Path:
     """Resolve a path and make sure it stays inside the workspace."""
     p = (ROOT / path).resolve()
-    if ROOT.resolve() not in p.parents and p != ROOT.resolve():
+    if p != ROOT and ROOT not in p.parents:
         raise PermissionError(f"Path outside workspace: {path}")
     return p
 

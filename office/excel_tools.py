@@ -14,7 +14,7 @@ from openpyxl.styles.differential import DifferentialStyle
 from openpyxl.utils import get_column_letter
 
 from common import ROOT, approved, confirm, guard, parse_pipe_rows, safe, tool
-from excel_design import design_report
+from office_design.excel_design import design_report
 
 # ---------- Excel (.xlsx) ----------
 XL_HEAD_FILL = PatternFill("solid", fgColor="1F3A5F")

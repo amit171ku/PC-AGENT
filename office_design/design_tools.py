@@ -1,15 +1,6 @@
-"""Agent tools for the one-call restyle of EXISTING Word and PowerPoint files.
-
-word_design_report -> word_design.py   (navy cover, contents, headings, tables, header/footer)
-ppt_design_deck    -> ppt_design.py    (navy title slide and title bands, fonts, tables, charts, footer)
-
-Both save a NEW file, never touch the original, and reopen the result to verify it.
-(The Excel counterpart, excel_design_report, lives in excel_tools.py / excel_design.py.)
-REGISTRY lists (group, schema, function) for main.py.
-"""
 from common import ROOT, approved, confirm, safe, tool
-from ppt_design import design_deck
-from word_design import design_document
+from office_design.ppt_design import design_deck
+from office_design.word_design import design_document
 
 
 def _prepare(path, output, ext):
