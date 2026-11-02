@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from groq import APIStatusError, Groq, RateLimitError
 
 from browser import browser_tools
-from office import common
+import common
 from office_design import design_tools
 from office import doc_tools
 from office import excel_tools
