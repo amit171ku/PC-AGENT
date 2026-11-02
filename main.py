@@ -22,13 +22,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from groq import APIStatusError, Groq, RateLimitError
 
-import browser_tools
-import common
-import design_tools
-import doc_tools
-import excel_tools
-import ppt_tools
-import word_tools
+from browser import browser_tools
+from office import common
+from office_design import design_tools
+from office import doc_tools
+from office import excel_tools
+from office import ppt_tools
+from office import word_tools
 from common import LOG, ROOT, TRASH, safe, tool
 
 # ---------- Config ----------
