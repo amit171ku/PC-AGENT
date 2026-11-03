@@ -109,7 +109,7 @@ PC-AGENT/
 
 ### Requirements
 
-- Python 3.10 or newer
+- Python 3.14 or newer
 - Git
 - Groq API key
 - Internet connection for Groq API and web browsing
