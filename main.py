@@ -170,12 +170,29 @@ def emit(event: dict):
         asyncio.run_coroutine_threadsafe(broadcast(event), loop)
 
 
+def _wait_pumping(event, timeout):
+    """Wait for the user, but keep the browser responsive so they can use it (e.g. log in by hand)."""
+    end = time.time() + timeout
+    while not event.is_set() and time.time() < end:
+        browser_tools.pump(100)
+    return event.is_set()
+
+
+def _next_command():
+    """Wait for the next chat message. The browser stays alive while idle, so manual logins keep working."""
+    while True:
+        try:
+            return cmd_q.get_nowait()
+        except queue.Empty:
+            browser_tools.pump(100)
+
+
 def confirm(action: str) -> bool:
     cid = uuid.uuid4().hex
     box = {"event": threading.Event(), "ok": False}
     pending[cid] = box
     emit({"type": "confirm", "id": cid, "text": action})
-    box["event"].wait(timeout=120)      # 2 minutes timeout = deny
+    _wait_pumping(box["event"], 120)    # 2 minutes timeout = deny
     pending.pop(cid, None)
     return box["ok"]
 
@@ -260,7 +277,7 @@ def ask_user(question: str) -> str:
     box = {"event": threading.Event(), "text": ""}
     answers[qid] = box
     emit({"type": "ask", "id": qid, "text": question})
-    box["event"].wait(timeout=900)
+    _wait_pumping(box["event"], 900)
     answers.pop(qid, None)
     return box["text"].strip() or "(No answer given. Proceed with sensible defaults and mark unknown details as TBD.)"
 
@@ -325,6 +342,19 @@ BASE_PROMPT = (
     "`search_web` automatically performs the search and returns results to you. "
     "Browser tools are named browser_* (browser_open, browser_click, browser_fill, browser_extract_text, ...). "
     "Keep replies short and never bypass confirmations."
+    "\nRESEARCH RULES: For any factual or current-info question: "
+    "(1) call search_web; "
+    "(2) browser_open the 1-3 most relevant result URLs and call browser_extract_text to read them; "
+    "(3) answer ONLY from what you actually read. Do not rely on search snippets alone for important claims. "
+    "Cite the source URL next to each key claim, and end with a 'Sources:' list of the URLs you actually used. "
+    "If the pages do not contain the answer, say \"I couldn't find this in the sources I read\" instead of guessing. "
+    "If sources disagree, say so and cite both."
+    "\nREPLY FORMAT (Markdown): start with a 1-2 sentence answer. Use a short bullet list for several items, "
+    "or a table when comparing things (max 4 columns). Bold only key names or numbers. "
+    "Put sources at the end under **Sources:** as one bullet per source: - [page title](url). "
+    "Never paste long raw URLs inside sentences. No emojis, no filler, no repeating the question. "
+    "After browser actions, report in 2-3 short lines: what was done, what changed, what is next. "
+    "When asking the user questions, use a numbered list with one question per line."
 )
 
 OFFICE_PROMPT = (
@@ -338,6 +368,33 @@ OFFICE_PROMPT = (
     "4. COMPARISONS / BEFORE & AFTER: Call ppt_add_split_slide for 2-column comparative analysis.\n"
     "5. DATA & TABLES: Call ppt_add_chart_slide for trends or ppt_add_table_slide for structured matrices.\n"
     "DO NOT put all content into plain bullets. Every deck must contain at least 2 visual card or KPI slides.\n"
+)
+
+
+SITE_RE = re.compile(
+    r"naukri|linkedin|profile|portal|log ?in|sign ?in|my account|"
+    r"update (my )?(resume|cv|headline|summary|skills)|fill (out )?(the |this )?form|on (the |this )?website",
+    re.I)
+
+SITE_PROMPT = (
+    "\nWEBSITE TASKS (profile updates, forms, logged-in sites):\n"
+    "1. Open the site with browser_open. If the result contains 'NOTICE: Login' or 'NOTICE: CAPTCHA', STOP: "
+    "call ask_user telling the user to log in / solve it in the browser window and reply 'done', then continue. "
+    "NEVER type passwords, OTPs or card details.\n"
+    "2. Call browser_snapshot to get numbered elements. Act with browser_click_ref(ref) and "
+    "browser_fill_ref(ref, text). Numbers go stale after any click or page change: call browser_snapshot again "
+    "before the next action.\n"
+    "3. Profile content: call read_file('templates/profile.md') and use ONLY the text from it. Never invent or "
+    "embellish facts about the user. If a needed detail is missing, use ask_user.\n"
+    "4. BEFORE clicking any Save/Submit/Update/Apply/Send/Post button, call ask_user with a short preview of the "
+    "exact values you filled and wait for an explicit yes. If the answer is not a clear yes, do not click.\n"
+    "5. After saving, call browser_snapshot or browser_extract_text to verify the change, then report what changed.\n"
+    "6. Never send messages or connection requests, never apply to jobs, and never delete anything unless the user "
+    "explicitly asks for that exact action.\n"
+    "7. Work in small steps. If the page looks different from expected, stop and report instead of guessing.\n"
+    "SITE NOTES: Naukri profile page is https://www.naukri.com/mnjuser/profile (sections such as Resume headline, "
+    "Profile summary, Key skills each have an edit icon). LinkedIn profile edits start at the pencil icons on "
+    "your own profile page; do only the edit the user asked for.\n"
 )
 
 
@@ -355,8 +412,14 @@ def compact(messages, tail=6, tool_tail=10, limit=1200):
                              for k, v in a.items()}
                     c["function"]["arguments"] = json.dumps(short)
     for m in messages[:max(len(messages) - tool_tail, 0)]:
-        if m.get("role") == "tool" and len(m.get("content", "")) > limit:
-            m["content"] = m["content"][:limit] + " [trimmed]"
+        if m.get("role") == "tool":
+            c = m.get("content", "")
+            # Research results (search lists / page text) carry source URLs: keep more of them.
+            # When the request is too large (limit < 1000), trim hard as an emergency measure.
+            has_source = "URL:" in c or c.startswith("Source:") or c.startswith("Opened:")
+            lim = 3000 if (has_source and limit >= 1000) else limit
+            if len(c) > lim:
+                m["content"] = c[:lim] + " [trimmed]"
 
 
 def trim_history(history, keep=24):
@@ -484,25 +547,30 @@ def run(messages, tools):
 
 def worker():
     office = False
+    site = False
     groups = set()
     history = [{"role": "system", "content": BASE_PROMPT}]
     while True:
-        text = cmd_q.get()
+        text = _next_command()
         if text is None:
             browser_tools.close_browser()
             break
         if text == "__RESET__":
             office = False
+            site = False
             groups = set()
             history = [{"role": "system", "content": BASE_PROMPT}]
             continue
+        if SITE_RE.search(text):
+            site = True
         if OFFICE_RE.search(text):
             office = True
             found = {g for g, rx in GROUP_RE.items() if rx.search(text)}
             groups |= found if found else ({"word", "excel", "ppt"} if not groups else set())
         history.append({"role": "user", "content": text})
         history = trim_history(history)
-        history[0]["content"] = BASE_PROMPT + (OFFICE_PROMPT if office else "")
+        history[0]["content"] = (BASE_PROMPT + (OFFICE_PROMPT if office else "")
+                                 + (SITE_PROMPT if site else ""))
         tools = build_tools(groups) if office else TOOLS_CORE
         try:
             answer = run(history, tools)
